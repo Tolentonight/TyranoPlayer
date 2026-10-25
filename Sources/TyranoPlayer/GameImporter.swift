@@ -30,6 +30,57 @@ final class GameImporter: ObservableObject {
 
     init() {
         loadMetadata()
+        // 启动时自动创建一个说明文件，这样在系统「文件」App 的「我的 iPhone -> TyranoPlayer -> Games」就能立刻看到文件夹
+        let readmeURL = gamesBaseURL.appendingPathComponent("把游戏文件夹放进这里.txt")
+        if !fileManager.fileExists(atPath: readmeURL.path) {
+            try? "你可以直接在系统「文件」App 中把解压好的 Tyrano 游戏文件夹移动或复制到本 Games 目录下，然后回到 TyranoPlayer 点击左上角刷新按钮即可秒速识别！".write(to: readmeURL, atomically: true, encoding: .utf8)
+        }
+        scanSandboxGamesDirectory(silentIfNone: true)
+    }
+
+    /// 直接扫描沙盒 Documents/Games/ 目录（用户在系统「文件」App 中把游戏直接放进「我的 iPhone/TyranoPlayer/Games」后无需复制即可秒导入）
+    func scanSandboxGamesDirectory(silentIfNone: Bool = false) {
+        guard let subdirs = try? fileManager.contentsOfDirectory(
+            at: gamesBaseURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        var newlyAdded = 0
+        for dirURL in subdirs {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let folderName = dirURL.lastPathComponent
+            if games.contains(where: { $0.folderName == folderName }) { continue }
+
+            try? Self.preprocessArchives(in: dirURL)
+            if let engineDir = Self.findTyranoRootDirectory(in: dirURL) {
+                let indexURL = engineDir.appendingPathComponent("index.html")
+                let relEntry = Self.relativePath(from: dirURL, to: indexURL)
+                let title = Self.extractHTMLTitle(from: indexURL)
+                    ?? Self.extractPackageJSONTitle(in: engineDir)
+                    ?? folderName
+                let cover = Self.findCoverImage(in: engineDir, rootURL: dirURL)
+                let newGame = Game(
+                    id: UUID(),
+                    title: title,
+                    folderName: folderName,
+                    relativeEntryPath: relEntry,
+                    relativeCoverPath: cover,
+                    coverUpdatedAt: Date(),
+                    importedAt: Date()
+                )
+                games.insert(newGame, at: 0)
+                newlyAdded += 1
+            }
+        }
+
+        if newlyAdded > 0 {
+            saveMetadata()
+            showToast("从沙盒目录发现并导入了 \(newlyAdded) 款游戏！")
+        } else if !silentIfNone {
+            showToast("扫描完成，未在 TyranoPlayer/Games 下发现新游戏")
+        }
     }
 
     func loadMetadata() {
@@ -183,11 +234,12 @@ final class GameImporter: ObservableObject {
     // MARK: - 后台导入、纯原生 ZIP / ASAR 解包与目录扫描
 
     nonisolated private static func performImport(
-        from sourceURL: URL,
+        from initialSourceURL: URL,
         gamesBaseURL: URL,
         onProgress: @escaping @Sendable (Double, String) -> Void
     ) throws -> Game {
         let fm = FileManager.default
+        var sourceURL = initialSourceURL
         let hasAccess = sourceURL.startAccessingSecurityScopedResource()
         defer {
             if hasAccess { sourceURL.stopAccessingSecurityScopedResource() }
@@ -196,6 +248,43 @@ final class GameImporter: ObservableObject {
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: sourceURL.path, isDirectory: &isDir) else {
             throw GameImportError.securityScopeDenied
+        }
+
+        // 如果用户点选的是游戏文件夹内部的 index.html（或任意非压缩包文件），自动向上推导父文件夹作为导入源
+        let pickedExt = sourceURL.pathExtension.lowercased()
+        let parentDir = sourceURL.deletingLastPathComponent()
+        let parentHasAccess = parentDir.startAccessingSecurityScopedResource()
+        defer {
+            if parentHasAccess { parentDir.stopAccessingSecurityScopedResource() }
+        }
+        if !isDir.boolValue && !["zip", "nw", "asar", "7z", "rar"].contains(pickedExt) {
+            sourceURL = parentDir
+            isDir = ObjCBool(true)
+        }
+
+        // 如果用户选中的文件夹本身就已经在沙盒 Games 目录内，直接原地注册，免去重复拷贝
+        if isDir.boolValue && sourceURL.standardizedFileURL.path.hasPrefix(gamesBaseURL.standardizedFileURL.path + "/") {
+            onProgress(0.4, "检测到已在沙盒目录内，正在直接注册…")
+            try? preprocessArchives(in: sourceURL, onProgress: onProgress)
+            guard let engineDir = findTyranoRootDirectory(in: sourceURL) else {
+                throw GameImportError.notTyranoGame
+            }
+            let indexURL = engineDir.appendingPathComponent("index.html")
+            let relEntry = relativePath(from: sourceURL, to: indexURL)
+            let title = extractHTMLTitle(from: indexURL)
+                ?? extractPackageJSONTitle(in: engineDir)
+                ?? sourceURL.lastPathComponent
+            let cover = findCoverImage(in: engineDir, rootURL: sourceURL)
+            onProgress(1.0, "导入完成！")
+            return Game(
+                id: UUID(),
+                title: title,
+                folderName: sourceURL.lastPathComponent,
+                relativeEntryPath: relEntry,
+                relativeCoverPath: cover,
+                coverUpdatedAt: Date(),
+                importedAt: Date()
+            )
         }
 
         let gameUUID = UUID()

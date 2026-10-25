@@ -12,12 +12,80 @@ extension UTType {
     }
 }
 
+enum PickerImportMode: Identifiable {
+    case folder
+    case archive
+    case anyItem
+
+    var id: Int {
+        switch self {
+        case .folder: return 1
+        case .archive: return 2
+        case .anyItem: return 3
+        }
+    }
+
+    var contentTypes: [UTType] {
+        switch self {
+        case .folder:
+            return [.folder]
+        case .archive:
+            return [.zip, .archive, .asarArchive, .nwArchive, .data]
+        case .anyItem:
+            // 允许直接点击文件夹内的 index.html 或任意文件，自动向上推导整个游戏文件夹
+            return [.folder, .item, .html, .zip, .archive, .asarArchive, .nwArchive, .data]
+        }
+    }
+}
+
+/// 使用原生 UIDocumentPickerViewController 替代 SwiftUI 双 .fileImporter，彻底解决 iOS 17+ 点击「打开」无响应或回调被吞 Bug
+struct NativeDocumentPicker: UIViewControllerRepresentable {
+    let contentTypes: [UTType]
+    let onPick: (URL) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick, onCancel: onCancel)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: false)
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        let onCancel: () -> Void
+
+        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
+            self.onPick = onPick
+            self.onCancel = onCancel
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let first = urls.first else {
+                onCancel()
+                return
+            }
+            onPick(first)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCancel()
+        }
+    }
+}
+
 struct GameLibraryView: View {
     @EnvironmentObject private var importer: GameImporter
     @EnvironmentObject private var orientationManager: OrientationManager
 
-    @State private var showingFolderImporter = false
-    @State private var showingArchiveImporter = false
+    @State private var activePickerMode: PickerImportMode?
     @State private var activeGame: Game?
     @State private var gamePendingEdit: Game?
     @State private var gamePendingDeletion: Game?
@@ -72,18 +140,41 @@ struct GameLibraryView: View {
             }
             .navigationTitle("Tyrano 游戏库")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        importer.scanSandboxGamesDirectory()
+                    } label: {
+                        Label("扫描沙盒目录", systemImage: "arrow.clockwise.circle")
+                    }
+                    .disabled(importer.isImporting)
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
-                            showingFolderImporter = true
+                            activePickerMode = .folder
                         } label: {
-                            Label("导入游戏文件夹（推荐）", systemImage: "folder.badge.plus")
+                            Label("选择游戏文件夹导入", systemImage: "folder.badge.plus")
                         }
 
                         Button {
-                            showingArchiveImporter = true
+                            activePickerMode = .anyItem
+                        } label: {
+                            Label("点选文件夹内的 index.html 导入（推荐）", systemImage: "doc.text.magnifyingglass")
+                        }
+
+                        Button {
+                            activePickerMode = .archive
                         } label: {
                             Label("导入 .zip / app.asar / package.nw", systemImage: "doc.zipper")
+                        }
+
+                        Divider()
+
+                        Button {
+                            importer.scanSandboxGamesDirectory()
+                        } label: {
+                            Label("直接扫描「我的 iPhone/TyranoPlayer/Games」", systemImage: "folder.fill.badge.gearshape")
                         }
                     } label: {
                         Label("导入游戏", systemImage: "plus.circle.fill")
@@ -91,21 +182,21 @@ struct GameLibraryView: View {
                     .disabled(importer.isImporting)
                 }
             }
-            // 选择文件夹导入
-            .fileImporter(
-                isPresented: $showingFolderImporter,
-                allowedContentTypes: [.folder],
-                allowsMultipleSelection: false
-            ) { result in
-                handleImporterResult(result)
-            }
-            // 选择 .zip / .asar / .nw 导入
-            .fileImporter(
-                isPresented: $showingArchiveImporter,
-                allowedContentTypes: [.zip, .archive, .asarArchive, .nwArchive],
-                allowsMultipleSelection: false
-            ) { result in
-                handleImporterResult(result)
+            // 统一使用单一 sheet 挂载原生 UIDocumentPickerViewController
+            .sheet(item: $activePickerMode) { mode in
+                NativeDocumentPicker(
+                    contentTypes: mode.contentTypes,
+                    onPick: { pickedURL in
+                        activePickerMode = nil
+                        Task {
+                            await importer.importGame(from: pickedURL)
+                        }
+                    },
+                    onCancel: {
+                        activePickerMode = nil
+                    }
+                )
+                .ignoresSafeArea()
             }
             // 编辑名称与封面弹窗
             .sheet(item: $gamePendingEdit) { game in
@@ -167,42 +258,38 @@ struct GameLibraryView: View {
         }
     }
 
-    private func handleImporterResult(_ result: Result<[URL], Error>) {
-        switch result {
-        case .success(let urls):
-            guard let firstURL = urls.first else { return }
-            Task {
-                await importer.importGame(from: firstURL)
-            }
-        case .failure(let error):
-            importer.errorMessage = "未选择文件或读取失败：\(error.localizedDescription)"
-        }
-    }
-
     private var emptyStateView: some View {
         ContentUnavailableView {
             Label("暂无已导入的 Tyrano 游戏", systemImage: "gamecontroller.fill")
         } description: {
-            Text("点击右上角「+」从系统「文件」App 选择包含 index.html + tyrano 的游戏文件夹或 .zip / app.asar 导入。")
+            Text("方式 1（最稳最快）：在系统「文件」App 中把游戏文件夹直接移入「我的 iPhone -> TyranoPlayer -> Games」，然后点击下方「扫描 Games 目录」。
+方式 2：点击下方按钮选择游戏文件夹、里面的 index.html 或 .zip 导入。")
         } actions: {
-            HStack(spacing: 12) {
+            VStack(spacing: 10) {
                 Button {
-                    showingFolderImporter = true
+                    importer.scanSandboxGamesDirectory()
                 } label: {
-                    Label("选择文件夹导入", systemImage: "folder.badge.plus")
+                    Label("扫描 TyranoPlayer/Games 目录（秒导入）", systemImage: "arrow.clockwise.circle.fill")
                         .fontWeight(.semibold)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .frame(minWidth: 240)
                 }
                 .buttonStyle(.borderedProminent)
 
                 Button {
-                    showingArchiveImporter = true
+                    activePickerMode = .anyItem
                 } label: {
-                    Label("导入 ZIP / ASAR", systemImage: "doc.zipper")
+                    Label("点选游戏内的 index.html 或 .zip 导入", systemImage: "doc.badge.plus")
                         .fontWeight(.semibold)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .frame(minWidth: 240)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    activePickerMode = .folder
+                } label: {
+                    Label("选择整个游戏文件夹导入", systemImage: "folder.badge.plus")
+                        .fontWeight(.semibold)
+                        .frame(minWidth: 240)
                 }
                 .buttonStyle(.bordered)
             }
@@ -407,19 +494,22 @@ struct GameEditSheet: View {
                     .disabled(titleInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .fileImporter(
-                isPresented: $showingFileImagePicker,
-                allowedContentTypes: [.image],
-                allowsMultipleSelection: false
-            ) { result in
-                if case .success(let urls) = result, let url = urls.first {
-                    let hasAccess = url.startAccessingSecurityScopedResource()
-                    defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
-                    if let data = try? Data(contentsOf: url) {
-                        selectedImageData = data
-                        resetToDefaultCover = false
+            .sheet(isPresented: $showingFileImagePicker) {
+                NativeDocumentPicker(
+                    contentTypes: [.image],
+                    onPick: { url in
+                        showingFileImagePicker = false
+                        let hasAccess = url.startAccessingSecurityScopedResource()
+                        defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+                        if let data = try? Data(contentsOf: url) {
+                            selectedImageData = data
+                            resetToDefaultCover = false
+                        }
+                    },
+                    onCancel: {
+                        showingFileImagePicker = false
                     }
-                }
+                )
             }
         }
     }
