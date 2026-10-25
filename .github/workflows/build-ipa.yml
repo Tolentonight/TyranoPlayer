@@ -1,0 +1,45 @@
+name: Build TyranoPlayer Unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode Project with XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build Unsigned iOS App (arm64)
+        run: |
+          xcodebuild clean build \
+            -project TyranoPlayer.xcodeproj \
+            -scheme TyranoPlayer \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package into TyranoPlayer.ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/TyranoPlayer.app Payload/
+          zip -r -9 TyranoPlayer.ipa Payload
+
+      - name: Upload TyranoPlayer.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TyranoPlayer-IPA
+          path: TyranoPlayer.ipa
+          if-no-files-found: error
