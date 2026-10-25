@@ -284,14 +284,15 @@ struct WebPlayerView: UIViewRepresentable {
                         el.preload = 'auto';
                         el.addEventListener('error', function() {
                             var src = el.getAttribute('src') || el.src || '';
-                            if (/\.ogg(\?.*)?$/i.test(src) && !el.dataset.fallbackTried) {
+                            var cleanSrc = src.split('?')[0].toLowerCase();
+                            if (cleanSrc.endsWith('.ogg') && !el.dataset.fallbackTried) {
                                 el.dataset.fallbackTried = 'm4a';
-                                el.src = src.replace(/\.ogg(\?.*)?$/i, '.m4a$1');
+                                el.src = src.slice(0, src.toLowerCase().lastIndexOf('.ogg')) + '.m4a';
                                 el.load();
                                 el.play().catch(function(){});
-                            } else if (el.dataset.fallbackTried === 'm4a') {
+                            } else if (el.dataset.fallbackTried === 'm4a' && src.toLowerCase().lastIndexOf('.m4a') !== -1) {
                                 el.dataset.fallbackTried = 'mp3';
-                                el.src = src.replace(/\.m4a(\?.*)?$/i, '.mp3$1');
+                                el.src = src.slice(0, src.toLowerCase().lastIndexOf('.m4a')) + '.mp3';
                                 el.load();
                                 el.play().catch(function(){});
                             }

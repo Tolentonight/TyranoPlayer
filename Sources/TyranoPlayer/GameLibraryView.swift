@@ -32,13 +32,11 @@ enum PickerImportMode: Identifiable {
         case .archive:
             return [.zip, .archive, .asarArchive, .nwArchive, .data]
         case .anyItem:
-            // 允许直接点击文件夹内的 index.html 或任意文件，自动向上推导整个游戏文件夹
             return [.folder, .item, .html, .zip, .archive, .asarArchive, .nwArchive, .data]
         }
     }
 }
 
-/// 使用原生 UIDocumentPickerViewController 替代 SwiftUI 双 .fileImporter，彻底解决 iOS 17+ 点击「打开」无响应或回调被吞 Bug
 struct NativeDocumentPicker: UIViewControllerRepresentable {
     let contentTypes: [UTType]
     let onPick: (URL) -> Void
@@ -182,7 +180,6 @@ struct GameLibraryView: View {
                     .disabled(importer.isImporting)
                 }
             }
-            // 统一使用单一 sheet 挂载原生 UIDocumentPickerViewController
             .sheet(item: $activePickerMode) { mode in
                 NativeDocumentPicker(
                     contentTypes: mode.contentTypes,
@@ -198,7 +195,6 @@ struct GameLibraryView: View {
                 )
                 .ignoresSafeArea()
             }
-            // 编辑名称与封面弹窗
             .sheet(item: $gamePendingEdit) { game in
                 GameEditSheet(
                     game: game,
@@ -212,7 +208,6 @@ struct GameLibraryView: View {
                     )
                 }
             }
-            // 错误提示弹窗
             .alert(
                 "导入提示",
                 isPresented: Binding(
@@ -226,7 +221,6 @@ struct GameLibraryView: View {
             } message: {
                 Text(importer.errorMessage ?? "")
             }
-            // 删除确认弹窗
             .confirmationDialog(
                 "确认删除该游戏？",
                 isPresented: Binding(
@@ -247,7 +241,6 @@ struct GameLibraryView: View {
             } message: {
                 Text("删除后将移除 App 沙盒内的游戏文件。")
             }
-            // 启动全屏游戏播放器
             .fullScreenCover(item: $activeGame) { game in
                 WebPlayerContainerView(
                     game: game,
@@ -262,8 +255,7 @@ struct GameLibraryView: View {
         ContentUnavailableView {
             Label("暂无已导入的 Tyrano 游戏", systemImage: "gamecontroller.fill")
         } description: {
-            Text("方式 1（最稳最快）：在系统「文件」App 中把游戏文件夹直接移入「我的 iPhone -> TyranoPlayer -> Games」，然后点击下方「扫描 Games 目录」。
-方式 2：点击下方按钮选择游戏文件夹、里面的 index.html 或 .zip 导入。")
+            Text("方式 1（推荐）：在系统「文件」App 中把游戏文件夹放进「我的 iPhone/TyranoPlayer/Games」后点下方扫描；方式 2：直接点选游戏文件夹内的 index.html 或 .zip 导入。")
         } actions: {
             VStack(spacing: 10) {
                 Button {
