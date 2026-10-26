@@ -1265,6 +1265,336 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // 5.5 四层 Windows/Electron/NW.js 运行时彻底屏蔽与 jQuery 防覆盖锁（参考 ShikemokuMK/tyranoscript 与 Tyranor-Next 设计）
+
+            function decodeSaveStr(raw) {
+
+                if (raw === null || raw === undefined || raw === '' || raw === 'null' || raw === 'undefined') return null;
+
+                var s = String(raw);
+
+                if (s.charAt(0) === '{' || s.charAt(0) === '[') return s;
+
+                try {
+
+                    var u = unescape(s);
+
+                    if (u && (u.charAt(0) === '{' || u.charAt(0) === '[')) return u;
+
+                } catch (e) {}
+
+                if (window.LZString) {
+
+                    try {
+
+                        var d1 = window.LZString.decompressFromBase64(s);
+
+                        if (d1) {
+
+                            if (d1.charAt(0) === '{' || d1.charAt(0) === '[') return d1;
+
+                            var u1 = unescape(d1);
+
+                            if (u1 && (u1.charAt(0) === '{' || u1.charAt(0) === '[')) return u1;
+
+                        }
+
+                    } catch (e) {}
+
+                    try {
+
+                        var d2 = window.LZString.decompressFromUTF16(s);
+
+                        if (d2) {
+
+                            if (d2.charAt(0) === '{' || d2.charAt(0) === '[') return d2;
+
+                            var u2 = unescape(d2);
+
+                            if (u2 && (u2.charAt(0) === '{' || u2.charAt(0) === '[')) return u2;
+
+                        }
+
+                    } catch (e) {}
+
+                }
+
+                return null;
+
+            }
+
+
+
+            function encodeSaveVal(val) {
+
+                var json = typeof val === 'string' ? val : JSON.stringify(val);
+
+                return escape(json);
+
+            }
+
+
+
+            function shieldTyranoJQueryInstance(jq) {
+
+                if (!jq || typeof jq !== 'function' || jq.__tyranoWindowsShielded) return;
+
+                jq.__tyranoWindowsShielded = true;
+
+                try {
+
+                    // (A) 永久锁定 $.isNWJS() 与 $.isElectron() 为 false，彻底阻断 tyrano/libs.js 走 Windows EXE 分支
+
+                    Object.defineProperty(jq, 'isNWJS', {
+
+                        configurable: true,
+
+                        enumerable: true,
+
+                        get: function() { return function() { return false; }; },
+
+                        set: function() {}
+
+                    });
+
+                    Object.defineProperty(jq, 'isElectron', {
+
+                        configurable: true,
+
+                        enumerable: true,
+
+                        get: function() { return function() { return false; }; },
+
+                        set: function() {}
+
+                    });
+
+
+
+                    // (B) 在 tyrano/libs.js 挂载之初即接管所有存档读写函数，彻底屏蔽 Windows 本地 .sav 文件读写
+
+                    var safeSetStorage = function(key, val) {
+
+                        customLocalStorage.setItem(String(key), encodeSaveVal(val));
+
+                    };
+
+                    var safeGetStorage = function(key) {
+
+                        return decodeSaveStr(customLocalStorage.getItem(String(key)));
+
+                    };
+
+                    var storageMethods = ['setStorageWeb', 'setStorageCompress', 'setStorageFile'];
+
+                    for (var sm = 0; sm < storageMethods.length; sm++) {
+
+                        (function(mName) {
+
+                            Object.defineProperty(jq, mName, {
+
+                                configurable: true,
+
+                                enumerable: true,
+
+                                get: function() { return safeSetStorage; },
+
+                                set: function() {}
+
+                            });
+
+                        })(storageMethods[sm]);
+
+                    }
+
+                    var getMethods = ['getStorageWeb', 'getStorageCompress', 'getStorageFile'];
+
+                    for (var gm = 0; gm < getMethods.length; gm++) {
+
+                        (function(mName) {
+
+                            Object.defineProperty(jq, mName, {
+
+                                configurable: true,
+
+                                enumerable: true,
+
+                                get: function() { return safeGetStorage; },
+
+                                set: function() {}
+
+                            });
+
+                        })(getMethods[gm]);
+
+                    }
+
+
+
+                    // (C) 拦截 $.loadText：在内存中自动将 Config.tjs 的 configSave=file 转为 webstorage 并修复 Shift-JIS
+
+                    var _origLoadText = undefined;
+
+                    Object.defineProperty(jq, 'loadText', {
+
+                        configurable: true,
+
+                        enumerable: true,
+
+                        get: function() {
+
+                            if (typeof _origLoadText !== 'function') return undefined;
+
+                            return function(file_path, callback) {
+
+                                var pathStr = String(file_path || '');
+
+                                var isConfig = pathStr.toLowerCase().indexOf('config.tjs') !== -1;
+
+                                return _origLoadText.call(jq, file_path, function(order_str) {
+
+                                    try {
+
+                                        var badChar = String.fromCharCode(65533);
+
+                                        if (typeof order_str === 'string' && order_str.indexOf(badChar) !== -1) {
+
+                                            var cleanPath = pathStr.split('?')[0].split('#')[0];
+
+                                            var xhrSjis = new XMLHttpRequest();
+
+                                            xhrSjis.open('GET', cleanPath, false);
+
+                                            xhrSjis.overrideMimeType('text/plain; charset=shift_jis');
+
+                                            xhrSjis.send(null);
+
+                                            if ((xhrSjis.status === 200 || xhrSjis.status === 0) && xhrSjis.responseText) {
+
+                                                order_str = xhrSjis.responseText;
+
+                                            }
+
+                                        }
+
+                                        if (isConfig && typeof order_str === 'string') {
+
+                                            order_str = sanitizeConfigTextInMemory(order_str);
+
+                                        }
+
+                                        if (window.TYRANO && window.TYRANO.kag) {
+
+                                            installVariableNullGuard(window.TYRANO.kag);
+
+                                        }
+
+                                    } catch (e) {}
+
+                                    if (callback) callback(order_str);
+
+                                });
+
+                            };
+
+                        },
+
+                        set: function(fn) {
+
+                            if (typeof fn === 'function') {
+
+                                _origLoadText = fn;
+
+                            }
+
+                        }
+
+                    });
+
+                } catch (e) {}
+
+            }
+
+
+
+            var _lockedJQuery = undefined;
+
+            function isValidJQueryInstance(val) {
+
+                return typeof val === 'function' && !!(val.fn && typeof val.fn === 'object');
+
+            }
+
+
+
+            try {
+
+                Object.defineProperty(window, 'jQuery', {
+
+                    configurable: true,
+
+                    enumerable: true,
+
+                    get: function() { return _lockedJQuery; },
+
+                    set: function(val) {
+
+                        if (isValidJQueryInstance(val)) {
+
+                            _lockedJQuery = val;
+
+                            shieldTyranoJQueryInstance(val);
+
+                        } else if (!_lockedJQuery && val !== undefined && val !== null && typeof val === 'function') {
+
+                            _lockedJQuery = val;
+
+                        } else {
+
+                            // 拦截 PC 版 index.html 中 window.jQuery = window.$ = require('./tyrano/libs/jquery-...') 返回空对象覆盖原生 jQuery
+
+                            sendLog('LOG', ['[Windows屏蔽层] 已拦截非法的 window.jQuery 覆盖，保护 jQuery 与插件链完好']);
+
+                        }
+
+                    }
+
+                });
+
+                Object.defineProperty(window, '$', {
+
+                    configurable: true,
+
+                    enumerable: true,
+
+                    get: function() { return _lockedJQuery; },
+
+                    set: function(val) {
+
+                        if (isValidJQueryInstance(val)) {
+
+                            _lockedJQuery = val;
+
+                            shieldTyranoJQueryInstance(val);
+
+                        } else if (!_lockedJQuery && val !== undefined && val !== null && typeof val === 'function') {
+
+                            _lockedJQuery = val;
+
+                        } else {
+
+                            sendLog('LOG', ['[Windows屏蔽层] 已拦截非法的 window.$ 覆盖，保护 $ 与插件链完好']);
+
+                        }
+
+                    }
+
+                });
+
+            } catch (e) {}
+
+
+
             // 6. CommonJS (window.require / module.exports) 与 Node.js / Electron / NW.js 核心模块模拟
 
             var pathModule = {
@@ -1857,9 +2187,79 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            var localProcessShim = {
+
+                platform: 'darwin',
+
+                arch: 'arm64',
+
+                execPath: '/Applications/TyranoPlayer.app/Contents/MacOS/TyranoPlayer',
+
+                resourcesPath: '/Applications/TyranoPlayer.app/Contents/Resources',
+
+                helperExecPath: '/Applications/TyranoPlayer.app',
+
+                argv: ['/Applications/TyranoPlayer.app/Contents/MacOS/TyranoPlayer'],
+
+                versions: { node: '18.0.0', chrome: '114.0.0' },
+
+                env: { NODE_ENV: 'production' },
+
+                cwd: function() { return '.'; },
+
+                nextTick: function(fn) { setTimeout(fn, 0); },
+
+                on: function() { return this; },
+
+                exit: function() {},
+
+                mainModule: { filename: 'index.html', paths: [] }
+
+            };
+
+
+
+            function isJQueryCoreModulePath(idStr) {
+
+                var lower = String(idStr || '').toLowerCase();
+
+                if (lower === 'jquery') return true;
+
+                if (lower.indexOf('jquery') !== -1 &&
+
+                    lower.indexOf('migrate') === -1 &&
+
+                    lower.indexOf('ui') === -1 &&
+
+                    lower.indexOf('swipe') === -1 &&
+
+                    lower.indexOf('a3d') === -1 &&
+
+                    lower.indexOf('lettering') === -1 &&
+
+                    lower.indexOf('textillate') === -1) {
+
+                    return true;
+
+                }
+
+                return false;
+
+            }
+
+
+
             window.require = function(moduleId) {
 
                 var id = String(moduleId || '');
+
+                // 拦截 index.html 中 require('./tyrano/libs/jquery-1.10.2.min.js') 等调用，直接返回已加载的原生 jQuery，严禁返回空对象 {}
+
+                if (isJQueryCoreModulePath(id) && (_lockedJQuery || window.jQuery || window.$)) {
+
+                    return _lockedJQuery || window.jQuery || window.$;
+
+                }
 
                 if (Object.prototype.hasOwnProperty.call(builtinModules, id)) {
 
@@ -1897,15 +2297,23 @@ struct WebPlayerView: UIViewRepresentable {
 
                                 var dir = pathModule.dirname(candidate);
 
-                                var wrapper = new Function('exports', 'require', 'module', '__filename', '__dirname', src);
+                                var wrapper = new Function('exports', 'require', 'module', '__filename', '__dirname', 'process', src);
 
-                                wrapper(mod.exports, window.require, mod, candidate, dir);
+                                wrapper(mod.exports, window.require, mod, candidate, dir, localProcessShim);
 
-                                if (candidate.indexOf('jquery') !== -1 && (mod.exports.fn || typeof mod.exports === 'function')) {
+                                if (isJQueryCoreModulePath(candidate)) {
 
-                                    if (!window.jQuery) window.jQuery = mod.exports;
+                                    if (typeof mod.exports === 'function' && !mod.exports.fn) {
 
-                                    if (!window.$) window.$ = mod.exports;
+                                        try { mod.exports = mod.exports(window); } catch (eJq) {}
+
+                                    }
+
+                                    if (!isValidJQueryInstance(mod.exports) && (_lockedJQuery || window.jQuery)) {
+
+                                        mod.exports = _lockedJQuery || window.jQuery;
+
+                                    }
 
                                 }
 
@@ -1965,17 +2373,27 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            if (typeof window.module === 'undefined') {
+            // 严禁在全局 window 上暴露 module / exports / process / nw / studio_api！
 
-                window.module = { exports: {} };
+            // 否则会导致：
 
-            }
+            // 1) remodal.js / jquery.touchSwipe.min.js 等 UMD 插件误判为 CommonJS 而不挂载到 window.jQuery
 
-            if (typeof window.exports === 'undefined') {
+            // 2) TyranoScript 的 tyrano/libs.js 误判为 Windows NW.js / Electron 客户端而走本地 .sav 文件读写分支
 
-                window.exports = window.module.exports;
+            try {
 
-            }
+                window.module = undefined;
+
+                window.exports = undefined;
+
+                window.process = undefined;
+
+                window.nw = undefined;
+
+                window.studio_api = undefined;
+
+            } catch (e) {}
 
             if (typeof window.__dirname === 'undefined') {
 
@@ -1998,48 +2416,6 @@ struct WebPlayerView: UIViewRepresentable {
             if (typeof window.Buffer === 'undefined') {
 
                 window.Buffer = builtinModules['buffer'].Buffer;
-
-            }
-
-
-
-            if (typeof window.process === 'undefined') {
-
-                window.process = {
-
-                    platform: 'darwin',
-
-                    arch: 'arm64',
-
-                    execPath: '/Applications/TyranoPlayer.app/Contents/MacOS/TyranoPlayer',
-
-                    resourcesPath: '/Applications/TyranoPlayer.app/Contents/Resources',
-
-                    helperExecPath: '/Applications/TyranoPlayer.app',
-
-                    argv: ['/Applications/TyranoPlayer.app/Contents/MacOS/TyranoPlayer'],
-
-                    versions: { node: '18.0.0', electron: '25.0.0', nw: '0.70.0', chrome: '114.0.0' },
-
-                    env: { NODE_ENV: 'production' },
-
-                    cwd: function() { return '.'; },
-
-                    nextTick: function(fn) { setTimeout(fn, 0); },
-
-                    on: function() { return this; },
-
-                    exit: function() {},
-
-                    mainModule: { filename: 'index.html', paths: [] }
-
-                };
-
-            }
-
-            if (typeof window.nw === 'undefined') {
-
-                window.nw = nwGuiModule;
 
             }
 
@@ -2369,19 +2745,25 @@ struct WebPlayerView: UIViewRepresentable {
 
                                     order_str = order_str.split(';configSave=webstorage_compress').join(';configSave = webstorage');
 
-                                    ensureKagVariableInitialized();
-
-                                    if (callback) callback(order_str);
-
-                                    ensureKagVariableInitialized();
-
                                     isConfigLoaded = true;
 
-                                    while (pendingScenarioCallbacks.length > 0) {
+                                    ensureKagVariableInitialized();
 
-                                        var nextFn = pendingScenarioCallbacks.shift();
+                                    try {
 
-                                        try { nextFn(); } catch (err) { console.error('[剧本队列执行异常]', err); }
+                                        if (callback) callback(order_str);
+
+                                    } finally {
+
+                                        ensureKagVariableInitialized();
+
+                                        while (pendingScenarioCallbacks.length > 0) {
+
+                                            var nextFn = pendingScenarioCallbacks.shift();
+
+                                            try { nextFn(); } catch (err) { console.error('[剧本队列执行异常]', err); }
+
+                                        }
 
                                     }
 

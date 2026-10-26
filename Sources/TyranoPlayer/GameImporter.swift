@@ -369,9 +369,27 @@ final class GameImporter: ObservableObject {
 
             let decoded = try JSONDecoder().decode([Game].self, from: data)
 
-            games = decoded.filter { item in
+            games = decoded.compactMap { item in
 
-                fileManager.fileExists(atPath: item.rootDirectoryURL(in: gamesBaseURL).path)
+                guard fileManager.fileExists(atPath: item.rootDirectoryURL(in: gamesBaseURL).path) else { return nil }
+
+                var fixed = item
+
+                if fixed.title.lowercased().contains("loading tyranoscript") {
+
+                    let entryURL = fixed.entryFileURL(in: gamesBaseURL)
+
+                    let engineDir = fixed.engineBaseDirectoryURL(in: gamesBaseURL)
+
+                    fixed.title = Self.extractHTMLTitle(from: entryURL)
+
+                        ?? Self.extractPackageJSONTitle(in: engineDir)
+
+                        ?? fixed.folderName
+
+                }
+
+                return fixed
 
             }
 
@@ -999,7 +1017,13 @@ final class GameImporter: ObservableObject {
 
             "chrome_100_percent.pak", "chrome_200_percent.pak", "resources.pak", "nw_100_percent.pak",
 
-            "nw_200_percent.pak", "credits.html", "license", "licenseselectron.txt", "version"
+            "nw_200_percent.pak", "credits.html", "license", "licenseselectron.txt", "version",
+
+            "debug.log", "notification_helper.exe", "nwjc.exe", "payload.exe", "d3dcompiler_47.dll",
+
+            "ffmpeg.dll", "libegl.dll", "libglesv2.dll", "node.dll", "nw.dll", "nw_elf.dll",
+
+            "vk_swiftshader.dll", "vulkan-1.dll", "vk_swiftshader_icd.json"
 
         ]
 
@@ -1347,6 +1371,14 @@ final class GameImporter: ObservableObject {
 
     nonisolated private static func extractHTMLTitle(from indexURL: URL) -> String? {
 
+        let engineDir = indexURL.deletingLastPathComponent()
+
+        if let configTitle = extractConfigTJSTitle(in: engineDir) {
+
+            return configTitle
+
+        }
+
         guard let html = try? String(contentsOf: indexURL, encoding: .utf8),
 
               let start = html.range(of: "<title>", options: .caseInsensitive),
@@ -1359,13 +1391,61 @@ final class GameImporter: ObservableObject {
 
         let title = String(html[start.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if title.isEmpty || ["tyranoscript", "document", "loading", "loading tyranoscript"].contains(title.lowercased()) || title.lowercased().contains("loading tyranoscript") {
+        let lower = title.lowercased()
+
+        if title.isEmpty || ["tyranoscript", "document", "loading", "loading tyranoscript"].contains(lower) || lower.contains("loading tyranoscript") {
 
             return nil
 
         }
 
         return title
+
+    }
+
+
+
+    nonisolated private static func extractConfigTJSTitle(in engineDir: URL) -> String? {
+
+        let cfgURL = engineDir.appendingPathComponent("data/system/Config.tjs")
+
+        guard let raw = try? Data(contentsOf: cfgURL),
+
+              let text = String(data: raw, encoding: .utf8) ?? String(data: raw, encoding: .shiftJIS) else {
+
+            return nil
+
+        }
+
+        for line in text.components(separatedBy: .newlines) {
+
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix(";System.title") {
+
+                let parts = trimmed.components(separatedBy: "=")
+
+                if parts.count >= 2 {
+
+                    var val = parts.dropFirst().joined(separator: "=").trimmingCharacters(in: .whitespaces)
+
+                    if val.hasSuffix(";") { val.removeLast() }
+
+                    val = val.trimmingCharacters(in: CharacterSet(charactersIn: "\"\x27 "))
+
+                    if !val.isEmpty && !val.lowercased().contains("tyranoscript") {
+
+                        return val
+
+                    }
+
+                }
+
+            }
+
+        }
+
+        return nil
 
     }
 

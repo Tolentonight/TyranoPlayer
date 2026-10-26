@@ -15,9 +15,9 @@ settings:
 
     PRODUCT_BUNDLE_IDENTIFIER: com.tyrano.player
 
-    MARKETING_VERSION: "1.4.0"
+    MARKETING_VERSION: "1.4.2"
 
-    CURRENT_PROJECT_VERSION: "5"
+    CURRENT_PROJECT_VERSION: "7"
 
     SWIFT_VERSION: "5.10"
 
@@ -61,9 +61,9 @@ targets:
 
         CFBundlePackageType: APPL
 
-        CFBundleShortVersionString: "1.4.0"
+        CFBundleShortVersionString: "1.4.2"
 
-        CFBundleVersion: "5"
+        CFBundleVersion: "7"
 
         LSRequiresIPhoneOS: true
 
