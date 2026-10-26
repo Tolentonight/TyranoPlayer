@@ -1127,9 +1127,7 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 5. 严格顺序控制：先预加载 Config.tjs -> 锁定初始化 sf/f/tf 非空变量守卫 -> 再允许跑脚本
-
-            window.__TYRANO_PRELOADED_CONFIG__ = xhrReadLocalFileSync('data/system/Config.tjs');
+            // 5. 严格顺序控制：锁定初始化 sf/f/tf 非空变量守卫
 
 
 
@@ -1431,9 +1429,45 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // (C) 拦截 $.loadText：在内存中自动将 Config.tjs 的 configSave=file 转为 webstorage 并修复 Shift-JIS
+                    // (C) 单次非递归拦截 $.loadText（带 __tyranoLoadTextWrapper 标记，严防重复包装引起 Maximum call stack size exceeded）
 
                     var _origLoadText = undefined;
+
+                    var _safeLoadTextWrapper = function(file_path, callback) {
+
+                        if (typeof _origLoadText !== 'function') return undefined;
+
+                        var pathStr = String(file_path || '');
+
+                        var isConfig = pathStr.toLowerCase().indexOf('config.tjs') !== -1;
+
+                        return _origLoadText.call(jq, file_path, function(order_str) {
+
+                            try {
+
+                                if (isConfig && typeof order_str === 'string') {
+
+                                    order_str = sanitizeConfigTextInMemory(order_str);
+
+                                }
+
+                                if (window.TYRANO && window.TYRANO.kag) {
+
+                                    installVariableNullGuard(window.TYRANO.kag);
+
+                                }
+
+                            } catch (e) {}
+
+                            if (callback) callback(order_str);
+
+                        });
+
+                    };
+
+                    _safeLoadTextWrapper.__tyranoLoadTextWrapper = true;
+
+
 
                     Object.defineProperty(jq, 'loadText', {
 
@@ -1445,63 +1479,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                             if (typeof _origLoadText !== 'function') return undefined;
 
-                            return function(file_path, callback) {
-
-                                var pathStr = String(file_path || '');
-
-                                var isConfig = pathStr.toLowerCase().indexOf('config.tjs') !== -1;
-
-                                return _origLoadText.call(jq, file_path, function(order_str) {
-
-                                    try {
-
-                                        var badChar = String.fromCharCode(65533);
-
-                                        if (typeof order_str === 'string' && order_str.indexOf(badChar) !== -1) {
-
-                                            var cleanPath = pathStr.split('?')[0].split('#')[0];
-
-                                            var xhrSjis = new XMLHttpRequest();
-
-                                            xhrSjis.open('GET', cleanPath, false);
-
-                                            xhrSjis.overrideMimeType('text/plain; charset=shift_jis');
-
-                                            xhrSjis.send(null);
-
-                                            if ((xhrSjis.status === 200 || xhrSjis.status === 0) && xhrSjis.responseText) {
-
-                                                order_str = xhrSjis.responseText;
-
-                                            }
-
-                                        }
-
-                                        if (isConfig && typeof order_str === 'string') {
-
-                                            order_str = sanitizeConfigTextInMemory(order_str);
-
-                                        }
-
-                                        if (window.TYRANO && window.TYRANO.kag) {
-
-                                            installVariableNullGuard(window.TYRANO.kag);
-
-                                        }
-
-                                    } catch (e) {}
-
-                                    if (callback) callback(order_str);
-
-                                });
-
-                            };
+                            return _safeLoadTextWrapper;
 
                         },
 
                         set: function(fn) {
 
-                            if (typeof fn === 'function') {
+                            if (typeof fn === 'function' && !fn.__tyranoLoadTextWrapper) {
 
                                 _origLoadText = fn;
 
@@ -2333,34 +2317,6 @@ struct WebPlayerView: UIViewRepresentable {
 
                 sendLog('WARN', ['[CommonJS] 自动兜底未知模块 require(' + id + ')']);
 
-                var fallbackTarget = function() { return {}; };
-
-                if (typeof Proxy !== 'undefined') {
-
-                    return new Proxy(fallbackTarget, {
-
-                        get: function(target, prop) {
-
-                            if (prop === '__esModule') return false;
-
-                            if (prop === 'default') return fallbackTarget;
-
-                            if (prop === Symbol.toPrimitive) return function() { return ''; };
-
-                            if (prop === 'toString' || prop === 'valueOf') return function() { return ''; };
-
-                            return fallbackTarget;
-
-                        },
-
-                        apply: function() { return {}; },
-
-                        construct: function() { return {}; }
-
-                    });
-
-                }
-
                 return {};
 
             };
@@ -2631,197 +2587,9 @@ struct WebPlayerView: UIViewRepresentable {
 
                 ensureKagVariableInitialized();
 
+                if (_lockedJQuery) {
 
-
-                if (window.jQuery && window.jQuery.setStorageWeb && !window.jQuery.__tyranoStorageHooked) {
-
-                    var $ = window.jQuery;
-
-                    $.__tyranoStorageHooked = true;
-
-
-
-                    $.setStorageWeb = function(key, val) {
-
-                        window.localStorage.setItem(String(key), encodeTyranoSaveValue(val));
-
-                    };
-
-                    $.getStorageWeb = function(key) {
-
-                        return decodeTyranoSaveString(window.localStorage.getItem(String(key)));
-
-                    };
-
-                    $.setStorageCompress = function(key, val) {
-
-                        window.localStorage.setItem(String(key), encodeTyranoSaveValue(val));
-
-                    };
-
-                    $.getStorageCompress = function(key) {
-
-                        return decodeTyranoSaveString(window.localStorage.getItem(String(key)));
-
-                    };
-
-                    $.setStorageFile = function(key, val) {
-
-                        var encoded = encodeTyranoSaveValue(val);
-
-                        window.localStorage.setItem(String(key), encoded);
-
-                    };
-
-                    $.getStorageFile = function(key) {
-
-                        var v = window.localStorage.getItem(String(key));
-
-                        return decodeTyranoSaveString(v);
-
-                    };
-
-                }
-
-
-
-                // 严格顺序保障：确保 Config.tjs 配置解析与 sf 变量初始化先于任何 .ks 剧本脚本执行
-
-                if (window.jQuery && window.jQuery.loadText && !window.jQuery.__tyranoLoadTextHooked) {
-
-                    var $ = window.jQuery;
-
-                    $.__tyranoLoadTextHooked = true;
-
-                    var origLoadText = $.loadText;
-
-                    $.loadText = function(file_path, callback) {
-
-                        var pathStr = String(file_path || '');
-
-                        var isConfig = pathStr.toLowerCase().indexOf('config.tjs') !== -1;
-
-
-
-                        origLoadText.call($, file_path, function(order_str) {
-
-                            try {
-
-                                var badChar = String.fromCharCode(65533);
-
-                                if (typeof order_str === 'string' && order_str.indexOf(badChar) !== -1) {
-
-                                    try {
-
-                                        var cleanPath = pathStr.split('?')[0].split('#')[0];
-
-                                        var xhrSjis = new XMLHttpRequest();
-
-                                        xhrSjis.open('GET', cleanPath, false);
-
-                                        xhrSjis.overrideMimeType('text/plain; charset=shift_jis');
-
-                                        xhrSjis.send(null);
-
-                                        if ((xhrSjis.status === 200 || xhrSjis.status === 0) && xhrSjis.responseText) {
-
-                                            order_str = xhrSjis.responseText;
-
-                                        }
-
-                                    } catch (eSjis) {}
-
-                                }
-
-
-
-                                if (isConfig && typeof order_str === 'string') {
-
-                                    order_str = order_str.split(';configSave = file').join(';configSave = webstorage');
-
-                                    order_str = order_str.split(';configSave=file').join(';configSave = webstorage');
-
-                                    order_str = order_str.split(';configSave = webstorage_compress').join(';configSave = webstorage');
-
-                                    order_str = order_str.split(';configSave=webstorage_compress').join(';configSave = webstorage');
-
-                                    isConfigLoaded = true;
-
-                                    ensureKagVariableInitialized();
-
-                                    try {
-
-                                        if (callback) callback(order_str);
-
-                                    } finally {
-
-                                        ensureKagVariableInitialized();
-
-                                        while (pendingScenarioCallbacks.length > 0) {
-
-                                            var nextFn = pendingScenarioCallbacks.shift();
-
-                                            try { nextFn(); } catch (err) { console.error('[剧本队列执行异常]', err); }
-
-                                        }
-
-                                    }
-
-                                    return;
-
-                                }
-
-
-
-                                var invokeScenario = function() {
-
-                                    ensureKagVariableInitialized();
-
-                                    if (callback) callback(order_str);
-
-                                    ensureKagVariableInitialized();
-
-                                };
-
-
-
-                                if (!isConfigLoaded && pathStr.toLowerCase().endsWith('.ks')) {
-
-                                    pendingScenarioCallbacks.push(invokeScenario);
-
-                                    setTimeout(function() {
-
-                                        if (!isConfigLoaded) {
-
-                                            isConfigLoaded = true;
-
-                                            while (pendingScenarioCallbacks.length > 0) {
-
-                                                var fn = pendingScenarioCallbacks.shift();
-
-                                                try { fn(); } catch (e) {}
-
-                                            }
-
-                                        }
-
-                                    }, 300);
-
-                                } else {
-
-                                    invokeScenario();
-
-                                }
-
-                            } catch (err) {
-
-                                console.error('[loadText 异常降级] (' + pathStr + '):', err);
-
-                            }
-
-                        });
-
-                    };
+                    shieldTyranoJQueryInstance(_lockedJQuery);
 
                 }
 
@@ -3003,15 +2771,15 @@ struct WebPlayerView: UIViewRepresentable {
 
                     setTimeout(function() {
 
-                        window.scrollTo(0, 0);
+                        if (window.__tyranoResizingGuard) return;
 
-                        window.dispatchEvent(new Event('resize'));
-
-                        window.dispatchEvent(new Event('orientationchange'));
-
-                        if (window.jQuery) { window.jQuery(window).trigger('resize'); }
+                        window.__tyranoResizingGuard = true;
 
                         try {
+
+                            window.scrollTo(0, 0);
+
+                            window.dispatchEvent(new Event('resize'));
 
                             if (window.TYRANO && window.TYRANO.kag && window.TYRANO.kag.view && typeof window.TYRANO.kag.view.resizeScreen === 'function') {
 
@@ -3019,9 +2787,15 @@ struct WebPlayerView: UIViewRepresentable {
 
                             }
 
-                        } catch (e) {}
+                            window.__tyranoApplyStretch();
 
-                        window.__tyranoApplyStretch();
+                        } catch (e) {
+
+                        } finally {
+
+                            window.__tyranoResizingGuard = false;
+
+                        }
 
                     }, delay);
 
@@ -3087,7 +2861,17 @@ struct WebPlayerView: UIViewRepresentable {
 
         context.coordinator.lastStretchState = isFullScreenStretch
 
-        webView.loadFileURL(entryHTMLURL, allowingReadAccessTo: readAccessURL)
+        if let httpURL = LocalGameHTTPServer.shared.startAndMakeEntryURL(rootDirectoryURL: readAccessURL, entryHTMLURL: entryHTMLURL) {
+
+            AppLogger.shared.append(level: .log, category: "HTTP", message: "本机 HTTP 资源服务已就绪: \(httpURL.absoluteString)")
+
+            webView.load(URLRequest(url: httpURL))
+
+        } else {
+
+            webView.loadFileURL(entryHTMLURL, allowingReadAccessTo: readAccessURL)
+
+        }
 
 
 
@@ -3121,7 +2905,15 @@ struct WebPlayerView: UIViewRepresentable {
 
             webView.configuration.userContentController.addUserScript(syncBackupScript)
 
-            webView.loadFileURL(entryHTMLURL, allowingReadAccessTo: readAccessURL)
+            if let httpURL = LocalGameHTTPServer.shared.startAndMakeEntryURL(rootDirectoryURL: readAccessURL, entryHTMLURL: entryHTMLURL) {
+
+                webView.load(URLRequest(url: httpURL))
+
+            } else {
+
+                webView.loadFileURL(entryHTMLURL, allowingReadAccessTo: readAccessURL)
+
+            }
 
         }
 
@@ -3516,6 +3308,698 @@ struct WebPlayerView: UIViewRepresentable {
             }
 
             return top
+
+        }
+
+    }
+
+}
+
+
+
+
+
+/// 本机 HTTP 游戏资源传输服务器（参考 GalPlay 的 FlyingFox / FlyingSocks 架构，基于 Darwin POSIX Socket 实现）：
+
+/// 1. 将本地游戏目录挂载为 https://www.google.com/url?sa=E\&source=gmail\&q=http://127.0.0.1:&lt;port&gt;/ 标准 Web 源，彻底解决 file:// 协议下 WebKit AJAX / WebAudio / Canvas 跨域限制
+
+/// 2. 自动进行不区分大小写的路径匹配（解决 Windows 游戏大小写不一致在 iOS APFS 下 404 的问题）
+
+/// 3. 在 HTTP 传输层自动将 Shift-JIS 文本转为 UTF-8，并在内存中将 Config.tjs 的 ;configSave = file 净化为 ;configSave = webstorage
+
+/// 4. 支持 HTTP 206 Partial Content (Range) 分片流式传输，确保 iOS WebKit 音视频流畅播放
+
+final class LocalGameHTTPServer: @unchecked Sendable {
+
+    static let shared = LocalGameHTTPServer()
+
+
+
+    private let lock = NSLock()
+
+    private var serverSocket: Int32 = -1
+
+    private var isRunning: Bool = false
+
+    private(set) var port: UInt16 = 0
+
+    private var rootDirectoryURL: URL?
+
+
+
+    private let acceptQueue = DispatchQueue(label: "com.tyrano.httpserver.accept", qos: .userInteractive)
+
+    private let clientQueue = DispatchQueue(label: "com.tyrano.httpserver.client", qos: .userInteractive, attributes: .concurrent)
+
+
+
+    private init() {}
+
+
+
+    func startAndMakeEntryURL(rootDirectoryURL: URL, entryHTMLURL: URL) -> URL? {
+
+        lock.lock()
+
+        self.rootDirectoryURL = rootDirectoryURL.standardizedFileURL
+
+        let activePort = ensureListeningLocked()
+
+        lock.unlock()
+
+
+
+        guard activePort > 0 else { return nil }
+
+        let baseComps = rootDirectoryURL.standardizedFileURL.pathComponents
+
+        let entryComps = entryHTMLURL.standardizedFileURL.pathComponents
+
+        let commonCount = zip(baseComps, entryComps).prefix(while: { $0 == $1 }).count
+
+        let relComps = entryComps.dropFirst(commonCount)
+
+        let encodedPath = relComps.map { comp in
+
+            comp.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? comp
+
+        }.joined(separator: "/")
+
+        return URL(string: "http://127.0.0.1:\(activePort)/\(encodedPath)")
+
+    }
+
+
+
+    private func ensureListeningLocked() -> UInt16 {
+
+        if isRunning && serverSocket >= 0 && port > 0 {
+
+            return port
+
+        }
+
+        if serverSocket >= 0 {
+
+            Darwin.close(serverSocket)
+
+            serverSocket = -1
+
+        }
+
+
+
+        let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+
+        guard sock >= 0 else { return 0 }
+
+
+
+        var yes: Int32 = 1
+
+        _ = Darwin.setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        _ = Darwin.setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+
+
+        var addr = sockaddr_in()
+
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+
+        addr.sin_family = sa_family_t(AF_INET)
+
+        addr.sin_port = port.bigEndian
+
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+
+
+        var bindResult = withUnsafePointer(to: &addr) { ptr in
+
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+
+                Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+
+            }
+
+        }
+
+        if bindResult != 0 && port != 0 {
+
+            addr.sin_port = 0
+
+            bindResult = withUnsafePointer(to: &addr) { ptr in
+
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+
+                    Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+
+                }
+
+            }
+
+        }
+
+        guard bindResult == 0 else {
+
+            Darwin.close(sock)
+
+            return 0
+
+        }
+
+
+
+        var boundAddr = sockaddr_in()
+
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+        _ = withUnsafeMutablePointer(to: &boundAddr) { ptr in
+
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+
+                Darwin.getsockname(sock, sockPtr, &addrLen)
+
+            }
+
+        }
+
+        let assignedPort = UInt16(bigEndian: boundAddr.sin_port)
+
+        guard assignedPort > 0, Darwin.listen(sock, 128) == 0 else {
+
+            Darwin.close(sock)
+
+            return 0
+
+        }
+
+
+
+        self.serverSocket = sock
+
+        self.port = assignedPort
+
+        self.isRunning = true
+
+
+
+        acceptQueue.async { [weak self] in
+
+            self?.acceptLoop(listenSocket: sock)
+
+        }
+
+        return assignedPort
+
+    }
+
+
+
+    private func acceptLoop(listenSocket: Int32) {
+
+        while true {
+
+            var clientAddr = sockaddr_in()
+
+            var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+            let clientSock = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+
+                    Darwin.accept(listenSocket, sockPtr, &clientLen)
+
+                }
+
+            }
+
+            if clientSock < 0 {
+
+                lock.lock()
+
+                let stillRunning = isRunning && (serverSocket == listenSocket)
+
+                lock.unlock()
+
+                if !stillRunning { break }
+
+                continue
+
+            }
+
+
+
+            var noSigPipe: Int32 = 1
+
+            _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
+            var tv = timeval(tv_sec: 5, tv_usec: 0)
+
+            _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+
+
+            clientQueue.async { [weak self] in
+
+                self?.handleClientConnection(clientSock)
+
+            }
+
+        }
+
+    }
+
+
+
+    private func handleClientConnection(_ clientSock: Int32) {
+
+        defer { Darwin.close(clientSock) }
+
+
+
+        var requestData = Data()
+
+        var buffer = [UInt8](repeating: 0, count: 8192)
+
+        while requestData.count < 65536 {
+
+            let n = Darwin.recv(clientSock, &buffer, buffer.count, 0)
+
+            if n <= 0 { break }
+
+            requestData.append(buffer, count: n)
+
+            if requestData.range(of: Data([13, 10, 13, 10])) != nil {
+
+                break
+
+            }
+
+        }
+
+
+
+        guard !requestData.isEmpty,
+
+              let headerText = String(data: requestData, encoding: .utf8) ?? String(data: requestData, encoding: .isoLatin1) else {
+
+            return
+
+        }
+
+
+
+        let lines = headerText.components(separatedBy: "\r\n")
+
+        guard let requestLine = lines.first else { return }
+
+        let parts = requestLine.split(separator: " ")
+
+        guard parts.count >= 2 else { return }
+
+
+
+        let method = String(parts[0]).uppercased()
+
+        if method == "OPTIONS" {
+
+            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+            sendAll(socket: clientSock, data: Data(resp.utf8))
+
+            return
+
+        }
+
+
+
+        var rawTarget = String(parts[1])
+
+        if let qIdx = rawTarget.firstIndex(of: "?") {
+
+            rawTarget = String(rawTarget[..<qIdx])
+
+        }
+
+        if let hIdx = rawTarget.firstIndex(of: "#") {
+
+            rawTarget = String(rawTarget[..<hIdx])
+
+        }
+
+        let decodedPath = rawTarget.removingPercentEncoding ?? rawTarget
+
+        let cleanRelPath = decodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+
+
+        lock.lock()
+
+        let baseDir = self.rootDirectoryURL
+
+        lock.unlock()
+
+
+
+        guard let rootDir = baseDir,
+
+              let resolvedFileURL = resolveLocalFile(in: rootDir, relativePath: cleanRelPath),
+
+              let payloadData = loadAndSanitizeFileData(at: resolvedFileURL) else {
+
+            let notFound = "HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+            sendAll(socket: clientSock, data: Data(notFound.utf8))
+
+            return
+
+        }
+
+
+
+        let mime = mimeType(for: resolvedFileURL.pathExtension.lowercased())
+
+        let totalLen = payloadData.count
+
+
+
+        // 检查 Range 请求头（iOS WebKit <audio>/<video> 媒体播放必须支持 HTTP 206 Partial Content）
+
+        var rangeHeader: String?
+
+        for line in lines.dropFirst() {
+
+            if line.lowercased().hasPrefix("range:") {
+
+                rangeHeader = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
+
+                break
+
+            }
+
+        }
+
+
+
+        if let rangeStr = rangeHeader, rangeStr.lowercased().hasPrefix("bytes="), totalLen > 0 {
+
+            let spec = rangeStr.dropFirst(6)
+
+            let rangeParts = spec.split(separator: "-", omittingEmptySubsequences: false)
+
+            if rangeParts.count == 2 {
+
+                let startVal = Int(rangeParts[0]) ?? 0
+
+                let endVal = rangeParts[1].isEmpty ? (totalLen - 1) : (Int(rangeParts[1]) ?? (totalLen - 1))
+
+                let clampedStart = max(0, min(startVal, totalLen - 1))
+
+                let clampedEnd = max(clampedStart, min(endVal, totalLen - 1))
+
+                let sliceLen = clampedEnd - clampedStart + 1
+
+
+
+                let header = "HTTP/1.1 206 Partial Content\r\nContent-Type: \(mime)\r\nAccept-Ranges: bytes\r\nContent-Range: bytes \(clampedStart)-\(clampedEnd)/\(totalLen)\r\nContent-Length: \(sliceLen)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+
+                sendAll(socket: clientSock, data: Data(header.utf8))
+
+                if method != "HEAD" {
+
+                    let slice = payloadData.subdata(in: clampedStart..<(clampedEnd + 1))
+
+                    sendAll(socket: clientSock, data: slice)
+
+                }
+
+                return
+
+            }
+
+        }
+
+
+
+        let okHeader = "HTTP/1.1 200 OK\r\nContent-Type: \(mime)\r\nAccept-Ranges: bytes\r\nContent-Length: \(totalLen)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+
+        sendAll(socket: clientSock, data: Data(okHeader.utf8))
+
+        if method != "HEAD" && totalLen > 0 {
+
+            sendAll(socket: clientSock, data: payloadData)
+
+        }
+
+    }
+
+
+
+    private func resolveLocalFile(in rootDir: URL, relativePath: String) -> URL? {
+
+        if relativePath.isEmpty || relativePath.contains("..") { return nil }
+
+        let fm = FileManager.default
+
+
+
+        // 1. 精确路径匹配（最快路径）
+
+        let directURL = rootDir.appendingPathComponent(relativePath)
+
+        var isDir: ObjCBool = false
+
+        if fm.fileExists(atPath: directURL.path, isDirectory: &isDir), !isDir.boolValue {
+
+            return directURL
+
+        }
+
+
+
+        // 2. 自动忽略大小写逐级匹配（解决 Windows 游戏素材大小写不一致问题）
+
+        let components = relativePath.split(separator: "/").map(String.init)
+
+        var currentURL = rootDir
+
+        for (idx, comp) in components.enumerated() {
+
+            let candidate = currentURL.appendingPathComponent(comp)
+
+            var subDir: ObjCBool = false
+
+            if fm.fileExists(atPath: candidate.path, isDirectory: &subDir) {
+
+                currentURL = candidate
+
+                if idx == components.count - 1 && !subDir.boolValue {
+
+                    return currentURL
+
+                }
+
+                continue
+
+            }
+
+            guard let children = try? fm.contentsOfDirectory(at: currentURL, includingPropertiesForKeys: nil, options: []) else {
+
+                break
+
+            }
+
+            let lowerComp = comp.precomposedStringWithCanonicalMapping.lowercased()
+
+            if let matched = children.first(where: { $0.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == lowerComp }) {
+
+                currentURL = matched
+
+                var matchedDir: ObjCBool = false
+
+                if idx == components.count - 1 && fm.fileExists(atPath: matched.path, isDirectory: &matchedDir) && !matchedDir.boolValue {
+
+                    return matched
+
+                }
+
+            } else if idx == components.count - 1 && lowerComp.hasSuffix(".ogg") {
+
+                // 3. 若请求 .ogg 音频不存在，自动查找同目录下同名 .m4a 或 .mp3
+
+                let baseName = String(lowerComp.dropLast(4))
+
+                if let fallbackAudio = children.first(where: {
+
+                    let n = $0.lastPathComponent.lowercased()
+
+                    return n == baseName + ".m4a" || n == baseName + ".mp3"
+
+                }) {
+
+                    return fallbackAudio
+
+                }
+
+                return nil
+
+            } else {
+
+                return nil
+
+            }
+
+        }
+
+        return nil
+
+    }
+
+
+
+    private func loadAndSanitizeFileData(at fileURL: URL) -> Data? {
+
+        guard let rawData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
+
+        let ext = fileURL.pathExtension.lowercased()
+
+        let fileName = fileURL.lastPathComponent.lowercased()
+
+
+
+        // 对 Tyrano 配置文件与剧本文件在内存中自动执行 Shift-JIS -> UTF-8 转码与 Config.tjs 净化，原文件保持只读
+
+        if ext == "tjs" || ext == "ks" {
+
+            var text: String?
+
+            if rawData.count >= 2 && ((rawData[0] == 0xFF && rawData[1] == 0xFE) || (rawData[0] == 0xFE && rawData[1] == 0xFF)) {
+
+                text = String(data: rawData, encoding: .utf16)
+
+            } else if let utf8Str = String(data: rawData, encoding: .utf8) {
+
+                text = utf8Str
+
+            } else if let sjisStr = String(data: rawData, encoding: .shiftJIS) {
+
+                text = sjisStr
+
+            } else if let eucStr = String(data: rawData, encoding: .japaneseEUC) {
+
+                text = eucStr
+
+            }
+
+
+
+            if var validText = text {
+
+                if fileName == "config.tjs" {
+
+                    validText = validText.replacingOccurrences(of: ";configSave = file", with: ";configSave = webstorage")
+
+                    validText = validText.replacingOccurrences(of: ";configSave=file", with: ";configSave = webstorage")
+
+                    validText = validText.replacingOccurrences(of: ";configSave = webstorage_compress", with: ";configSave = webstorage")
+
+                    validText = validText.replacingOccurrences(of: ";configSave=webstorage_compress", with: ";configSave = webstorage")
+
+                }
+
+                if let utf8Data = validText.data(using: .utf8) {
+
+                    return utf8Data
+
+                }
+
+            }
+
+        }
+
+        return rawData
+
+    }
+
+
+
+    private func mimeType(for ext: String) -> String {
+
+        switch ext {
+
+        case "html", "htm": return "text/html; charset=utf-8"
+
+        case "js", "mjs": return "application/javascript; charset=utf-8"
+
+        case "css": return "text/css; charset=utf-8"
+
+        case "json": return "application/json; charset=utf-8"
+
+        case "ks", "tjs", "txt": return "text/plain; charset=utf-8"
+
+        case "png": return "image/png"
+
+        case "jpg", "jpeg": return "image/jpeg"
+
+        case "gif": return "image/gif"
+
+        case "webp": return "image/webp"
+
+        case "svg": return "image/svg+xml"
+
+        case "ico": return "image/x-icon"
+
+        case "ogg", "oga": return "audio/ogg"
+
+        case "m4a", "mp4a": return "audio/mp4"
+
+        case "mp3": return "audio/mpeg"
+
+        case "wav": return "audio/wav"
+
+        case "mp4", "m4v": return "video/mp4"
+
+        case "webm": return "video/webm"
+
+        case "ogv": return "video/ogg"
+
+        case "woff": return "font/woff"
+
+        case "woff2": return "font/woff2"
+
+        case "ttf": return "font/ttf"
+
+        case "otf": return "font/otf"
+
+        default: return "application/octet-stream"
+
+        }
+
+    }
+
+
+
+    private func sendAll(socket: Int32, data: Data) {
+
+        data.withUnsafeBytes { rawBuf in
+
+            guard let base = rawBuf.baseAddress else { return }
+
+            var totalSent = 0
+
+            let count = data.count
+
+            while totalSent < count {
+
+                let sent = Darwin.send(socket, base.advanced(by: totalSent), count - totalSent, 0)
+
+                if sent <= 0 { break }
+
+                totalSent += sent
+
+            }
 
         }
 

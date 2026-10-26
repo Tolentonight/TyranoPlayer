@@ -217,9 +217,47 @@ final class GameImporter: ObservableObject {
 
                 restoredEntries = pkg.storageEntries
 
-            } else if let rawDict = try JSONSerialization.jsonObject(with: data) as? [String: String] {
+            } else if let rawDict = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] {
 
                 restoredEntries = rawDict
+
+            } else if let anyDict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+
+                for (k, v) in anyDict {
+
+                    if let strVal = v as? String {
+
+                        restoredEntries[k] = strVal
+
+                    } else if let subData = try? JSONSerialization.data(withJSONObject: v),
+
+                              let subStr = String(data: subData, encoding: .utf8) {
+
+                        restoredEntries[k] = subStr
+
+                    }
+
+                }
+
+                if restoredEntries.isEmpty, let fullStr = String(data: data, encoding: .utf8) {
+
+                    let baseKey = backupURL.deletingPathExtension().lastPathComponent
+
+                    restoredEntries[baseKey] = fullStr
+
+                }
+
+            } else if let rawSavText = (String(data: data, encoding: .utf8) ?? String(data: data, encoding: .shiftJIS))?.trimmingCharacters(in: .whitespacesAndNewlines),
+
+                      !rawSavText.isEmpty {
+
+                let baseKey = backupURL.deletingPathExtension().lastPathComponent
+
+                restoredEntries[baseKey] = rawSavText
+
+                restoredEntries["\(game.title)_tyrano_data"] = rawSavText
+
+                restoredEntries["_tyrano_data"] = rawSavText
 
             } else {
 
