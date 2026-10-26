@@ -1359,7 +1359,7 @@ final class GameImporter: ObservableObject {
 
         let title = String(html[start.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if title.isEmpty || ["tyranoscript", "document", "loading"].contains(title.lowercased()) {
+        if title.isEmpty || ["tyranoscript", "document", "loading", "loading tyranoscript"].contains(title.lowercased()) || title.lowercased().contains("loading tyranoscript") {
 
             return nil
 

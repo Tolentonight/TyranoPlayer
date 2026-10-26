@@ -1081,7 +1081,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                     xhr.send(null);
 
-                    if (xhr.status === 200 || xhr.status === 0) {
+                    if (xhr.status === 200 || (xhr.status === 0 && xhr.responseText && xhr.responseText.length > 0)) {
 
                         var txt = xhr.responseText;
 
