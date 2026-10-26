@@ -4367,9 +4367,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        let lines = headerText.components(separatedBy: "
+        let crlf = String(UnicodeScalar(13)) + String(UnicodeScalar(10))
 
-")
+        let lines = headerText.components(separatedBy: crlf)
 
         guard let requestLine = lines.first else { return }
 
@@ -4383,19 +4383,23 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         if method == "OPTIONS" {
 
-            let resp = "HTTP/1.1 200 OK
+            let resp = [
 
-Access-Control-Allow-Origin: *
+                "HTTP/1.1 200 OK",
 
-Access-Control-Allow-Methods: GET, HEAD, OPTIONS
+                "Access-Control-Allow-Origin: *",
 
-Content-Length: 0
+                "Access-Control-Allow-Methods: GET, HEAD, OPTIONS",
 
-Connection: close
+                "Content-Length: 0",
 
+                "Connection: close",
 
+                "",
 
-"
+                ""
+
+            ].joined(separator: crlf)
 
             sendAll(socket: clientSock, data: Data(resp.utf8))
 
@@ -4439,17 +4443,21 @@ Connection: close
 
               let payloadData = loadAndSanitizeFileData(at: resolvedFileURL) else {
 
-            let notFound = "HTTP/1.1 404 Not Found
+            let notFound = [
 
-Access-Control-Allow-Origin: *
+                "HTTP/1.1 404 Not Found",
 
-Content-Length: 0
+                "Access-Control-Allow-Origin: *",
 
-Connection: close
+                "Content-Length: 0",
 
+                "Connection: close",
 
+                "",
 
-"
+                ""
+
+            ].joined(separator: crlf)
 
             sendAll(socket: clientSock, data: Data(notFound.utf8))
 
@@ -4467,7 +4475,9 @@ Connection: close
 
         let cachePolicy = cacheControlHeader(for: ext)
 
-        let etag = ""\(totalLen)-\(resolvedFileURL.lastPathComponent.hashValue)""
+        let quoteChar = String(UnicodeScalar(34))
+
+        let etag = quoteChar + "\(totalLen)-\(abs(resolvedFileURL.lastPathComponent.hashValue))" + quoteChar
 
 
 
@@ -4497,19 +4507,23 @@ Connection: close
 
         if rangeHeader == nil, let clientETag = ifNoneMatch, clientETag == etag, isStaticCacheableAsset(ext: ext) {
 
-            let notModified = "HTTP/1.1 304 Not Modified
+            let notModified = [
 
-ETag: \(etag)
+                "HTTP/1.1 304 Not Modified",
 
-Cache-Control: \(cachePolicy)
+                "ETag: \(etag)",
 
-Access-Control-Allow-Origin: *
+                "Cache-Control: \(cachePolicy)",
 
-Connection: close
+                "Access-Control-Allow-Origin: *",
 
+                "Connection: close",
 
+                "",
 
-"
+                ""
+
+            ].joined(separator: crlf)
 
             sendAll(socket: clientSock, data: Data(notModified.utf8))
 
@@ -4541,27 +4555,31 @@ Connection: close
 
 
 
-                let header = "HTTP/1.1 206 Partial Content
+                let header = [
 
-Content-Type: \(mime)
+                    "HTTP/1.1 206 Partial Content",
 
-Accept-Ranges: bytes
+                    "Content-Type: \(mime)",
 
-Content-Range: bytes \(clampedStart)-\(clampedEnd)/\(totalLen)
+                    "Accept-Ranges: bytes",
 
-Content-Length: \(sliceLen)
+                    "Content-Range: bytes \(clampedStart)-\(clampedEnd)/\(totalLen)",
 
-ETag: \(etag)
+                    "Content-Length: \(sliceLen)",
 
-Access-Control-Allow-Origin: *
+                    "ETag: \(etag)",
 
-Cache-Control: \(cachePolicy)
+                    "Access-Control-Allow-Origin: *",
 
-Connection: close
+                    "Cache-Control: \(cachePolicy)",
 
+                    "Connection: close",
 
+                    "",
 
-"
+                    ""
+
+                ].joined(separator: crlf)
 
                 sendAll(socket: clientSock, data: Data(header.utf8))
 
@@ -4581,25 +4599,29 @@ Connection: close
 
 
 
-        let okHeader = "HTTP/1.1 200 OK
+        let okHeader = [
 
-Content-Type: \(mime)
+            "HTTP/1.1 200 OK",
 
-Accept-Ranges: bytes
+            "Content-Type: \(mime)",
 
-Content-Length: \(totalLen)
+            "Accept-Ranges: bytes",
 
-ETag: \(etag)
+            "Content-Length: \(totalLen)",
 
-Access-Control-Allow-Origin: *
+            "ETag: \(etag)",
 
-Cache-Control: \(cachePolicy)
+            "Access-Control-Allow-Origin: *",
 
-Connection: close
+            "Cache-Control: \(cachePolicy)",
 
+            "Connection: close",
 
+            "",
 
-"
+            ""
+
+        ].joined(separator: crlf)
 
         sendAll(socket: clientSock, data: Data(okHeader.utf8))
 
