@@ -369,7 +369,7 @@ final class GameImporter: ObservableObject {
 
             let decoded = try JSONDecoder().decode([Game].self, from: data)
 
-            games = decoded.compactMap { item in
+            games = decoded.compactMap { (item: Game) -> Game? in
 
                 guard fileManager.fileExists(atPath: item.rootDirectoryURL(in: gamesBaseURL).path) else { return nil }
 
@@ -377,7 +377,7 @@ final class GameImporter: ObservableObject {
 
                 if fixed.title.lowercased().contains("loading tyranoscript") {
 
-                    let entryURL = fixed.entryFileURL(in: gamesBaseURL)
+                    let entryURL = fixed.entryHTMLURL(in: gamesBaseURL)
 
                     let engineDir = fixed.engineBaseDirectoryURL(in: gamesBaseURL)
 
@@ -437,9 +437,23 @@ final class GameImporter: ObservableObject {
 
 
 
+        let progressHandler: @Sendable (Double, String) -> Void = { [weak self] fraction, status in
+
+            Task { @MainActor [weak self] in
+
+                self?.importProgress = min(max(fraction, 0.0), 1.0)
+
+                self?.importStatusText = status
+
+            }
+
+        }
+
+
+
         do {
 
-            let newItem = try await Task.detached(priority: .userInitiated) { [weak self] in
+            let newItem = try await Task.detached(priority: .userInitiated) {
 
                 try Self.performImport(
 
@@ -447,17 +461,7 @@ final class GameImporter: ObservableObject {
 
                     gamesBaseURL: baseDir,
 
-                    onProgress: { fraction, status in
-
-                        Task { @MainActor [weak self] in
-
-                            self?.importProgress = min(max(fraction, 0.0), 1.0)
-
-                            self?.importStatusText = status
-
-                        }
-
-                    }
+                    onProgress: progressHandler
 
                 )
 
@@ -579,21 +583,25 @@ final class GameImporter: ObservableObject {
 
 
 
+        let progressHandler: @Sendable (Double, String) -> Void = { [weak self] frac, msg in
+
+            Task { @MainActor [weak self] in
+
+                self?.importProgress = 0.1 + frac * 0.7
+
+                self?.importStatusText = msg
+
+            }
+
+        }
+
+
+
         do {
 
-            let scanned = try await Task.detached(priority: .userInitiated) { [weak self] () -> (String, String?) in
+            let scanned = try await Task.detached(priority: .userInitiated) { () -> (String, String?) in
 
-                try Self.preprocessArchives(in: rootURL) { frac, msg in
-
-                    Task { @MainActor [weak self] in
-
-                        self?.importProgress = 0.1 + frac * 0.7
-
-                        self?.importStatusText = msg
-
-                    }
-
-                }
+                try Self.preprocessArchives(in: rootURL, onProgress: progressHandler)
 
                 guard let engineDir = Self.findTyranoRootDirectory(in: rootURL) else {
 
@@ -1431,7 +1439,7 @@ final class GameImporter: ObservableObject {
 
                     if val.hasSuffix(";") { val.removeLast() }
 
-                    val = val.trimmingCharacters(in: CharacterSet(charactersIn: "\"\x27 "))
+                    val = val.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
 
                     if !val.isEmpty && !val.lowercased().contains("tyranoscript") {
 
