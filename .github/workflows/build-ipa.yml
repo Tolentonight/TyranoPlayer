@@ -1,45 +1,257 @@
+
 name: Build TyranoPlayer Unsigned IPA
 
+
+
 on:
+
   push:
+
     branches: [ main, master ]
+
   workflow_dispatch:
 
+
+
 jobs:
+
   build-ipa:
+
     runs-on: macos-15
+
     steps:
+
       - name: Checkout repository
+
         uses: actions/checkout@v4
 
-      - name: Generate Xcode Project with XcodeGen
+
+
+      - name: Generate AppIcon Asset Catalog
+
         run: |
+
+          mkdir -p Sources/TyranoPlayer/Assets.xcassets/AppIcon.appiconset
+
+          cat > Sources/TyranoPlayer/Assets.xcassets/Contents.json << 'JSONEOF'
+
+          {
+
+            "info" : {
+
+              "author" : "xcode",
+
+              "version" : 1
+
+            }
+
+          }
+
+          JSONEOF
+
+          cat > Sources/TyranoPlayer/Assets.xcassets/AppIcon.appiconset/Contents.json << 'JSONEOF'
+
+          {
+
+            "images" : [
+
+              {
+
+                "filename" : "AppIcon-1024.png",
+
+                "idiom" : "universal",
+
+                "platform" : "ios",
+
+                "size" : "1024x1024"
+
+              }
+
+            ],
+
+            "info" : {
+
+              "author" : "xcode",
+
+              "version" : 1
+
+            }
+
+          }
+
+          JSONEOF
+
+          cat > /tmp/gen_icon.swift << 'SWIFTEOF'
+
+          import AppKit
+
+
+
+          let rep = NSBitmapImageRep(
+
+              bitmapDataPlanes: nil,
+
+              pixelsWide: 1024,
+
+              pixelsHigh: 1024,
+
+              bitsPerSample: 8,
+
+              samplesPerPixel: 4,
+
+              hasAlpha: true,
+
+              isPlanar: false,
+
+              colorSpaceName: .deviceRGB,
+
+              bytesPerRow: 0,
+
+              bitsPerPixel: 0
+
+          )!
+
+          NSGraphicsContext.saveGraphicsState()
+
+          NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+
+
+
+          let fullRect = NSRect(x: 0, y: 0, width: 1024, height: 1024)
+
+          let bgGrad = NSGradient(colors: [
+
+              NSColor(calibratedRed: 0.05, green: 0.04, blue: 0.14, alpha: 1.0),
+
+              NSColor(calibratedRed: 0.14, green: 0.06, blue: 0.32, alpha: 1.0),
+
+              NSColor(calibratedRed: 0.04, green: 0.16, blue: 0.30, alpha: 1.0)
+
+          ])!
+
+          bgGrad.draw(in: fullRect, angle: -45)
+
+
+
+          let ring = NSBezierPath(ovalIn: NSRect(x: 152, y: 152, width: 720, height: 720))
+
+          ring.lineWidth = 14
+
+          NSColor(calibratedRed: 0.35, green: 0.78, blue: 1.0, alpha: 0.28).setStroke()
+
+          ring.stroke()
+
+
+
+          let tPath = NSBezierPath()
+
+          tPath.move(to: NSPoint(x: 210, y: 740))
+
+          tPath.line(to: NSPoint(x: 814, y: 740))
+
+          tPath.line(to: NSPoint(x: 740, y: 610))
+
+          tPath.line(to: NSPoint(x: 576, y: 610))
+
+          tPath.line(to: NSPoint(x: 576, y: 210))
+
+          tPath.line(to: NSPoint(x: 512, y: 145))
+
+          tPath.line(to: NSPoint(x: 448, y: 210))
+
+          tPath.line(to: NSPoint(x: 448, y: 610))
+
+          tPath.line(to: NSPoint(x: 284, y: 610))
+
+          tPath.close()
+
+
+
+          let tGrad = NSGradient(colors: [
+
+              NSColor(calibratedRed: 0.72, green: 0.25, blue: 1.0, alpha: 0.95),
+
+              NSColor(calibratedRed: 0.15, green: 0.85, blue: 1.0, alpha: 0.95)
+
+          ])!
+
+          tGrad.draw(in: tPath, angle: -60)
+
+          tPath.lineWidth = 10
+
+          NSColor(calibratedRed: 0.88, green: 0.95, blue: 1.0, alpha: 0.9).setStroke()
+
+          tPath.stroke()
+
+
+
+          let playPath = NSBezierPath()
+
+          playPath.move(to: NSPoint(x: 410, y: 630))
+
+          playPath.line(to: NSPoint(x: 410, y: 310))
+
+          playPath.line(to: NSPoint(x: 685, y: 470))
+
+          playPath.close()
+
+          NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.92).setFill()
+
+          playPath.fill()
+
+
+
+          NSGraphicsContext.restoreGraphicsState()
+
+          let pngData = rep.representation(using: .png, properties: [:])!
+
+          try! pngData.write(to: URL(fileURLWithPath: "Sources/TyranoPlayer/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"))
+
+          SWIFTEOF
+
+          swift /tmp/gen_icon.swift
+
+
+
+      - name: Generate Xcode Project with XcodeGen
+
+        run: |
+
           brew install xcodegen
+
           xcodegen generate
 
+
+
       - name: Build Unsigned iOS App (arm64)
+
         run: |
-          xcodebuild clean build \
-            -project TyranoPlayer.xcodeproj \
-            -scheme TyranoPlayer \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+
+          xcodebuild clean build             -project TyranoPlayer.xcodeproj             -scheme TyranoPlayer             -configuration Release             -sdk iphoneos             -derivedDataPath build             ARCHS=arm64             ONLY_ACTIVE_ARCH=NO             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO
+
+
 
       - name: Package into TyranoPlayer.ipa
+
         run: |
+
           mkdir -p Payload
+
           cp -R build/Build/Products/Release-iphoneos/TyranoPlayer.app Payload/
+
           zip -r -9 TyranoPlayer.ipa Payload
 
+
+
       - name: Upload TyranoPlayer.ipa Artifact
+
         uses: actions/upload-artifact@v4
+
         with:
+
           name: TyranoPlayer-IPA
+
           path: TyranoPlayer.ipa
+
           if-no-files-found: error
+
