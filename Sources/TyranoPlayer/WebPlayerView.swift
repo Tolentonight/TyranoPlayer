@@ -9,6 +9,8 @@ import UniformTypeIdentifiers
 
 import UIKit
 
+import Darwin
+
 
 
 struct WebPlayerContainerView: View {
@@ -729,6 +731,50 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // 自动恢复因缺图或弹窗中断的 UI 图层与点击事件
+
+            function recoverStuckUiState() {
+
+                try {
+
+                    if (window.jQuery) {
+
+                        var $ = window.jQuery;
+
+                        var $menu = $('.layer_menu');
+
+                        if ($menu.length && $menu.is(':visible')) {
+
+                            var hasItems = $menu.find('img, .save_list_item, .menu_item, .button').length > 0;
+
+                            if (!hasItems && $menu.text().trim().length === 0) {
+
+                                $menu.empty().hide();
+
+                            }
+
+                        }
+
+                        $('.layer_event_click').css({ 'display': 'block', 'pointer-events': 'auto' });
+
+                    }
+
+                    if (window.TYRANO && window.TYRANO.kag && window.TYRANO.kag.stat) {
+
+                        window.TYRANO.kag.stat.is_stop = false;
+
+                        window.TYRANO.kag.stat.is_wait = false;
+
+                        window.TYRANO.kag.stat.is_trans = false;
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
             window.addEventListener('error', function(e) {
 
                 try {
@@ -753,7 +799,11 @@ struct WebPlayerView: UIViewRepresentable {
 
                             }
 
-                            e.stopPropagation();
+                            // 关键修复：绝不调用 e.stopPropagation()！
+
+                            // 替换为 1x1 透明图后让浏览器正常触发 img.onload，保证 Tyrano 引擎 nextOrder() 与右侧按钮继续渲染
+
+                            setTimeout(recoverStuckUiState, 50);
 
                             return;
 
@@ -775,6 +825,8 @@ struct WebPlayerView: UIViewRepresentable {
 
                     sendLog('ERROR', ['[脚本异常已拦截]', detail]);
 
+                    setTimeout(recoverStuckUiState, 50);
+
                     if (e.preventDefault) e.preventDefault();
 
                 } catch (err) {}
@@ -793,9 +845,135 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 2. 独立命名空间隔离的原生持久化存档（每个游戏使用独立 UUID 前缀与独立 JSON，绝不串档）
+            // 拦截由于缺图或宏跳转 If 栈偏移引发的阻塞式 alert 报错弹窗，转为自愈恢复并继续推进指令
 
-            window.__TYRANO_NATIVE_SAVES__ = \(initialSavesJSON);
+            var _origWindowAlert = window.alert;
+
+            window.alert = function(msg) {
+
+                var text = String(msg || '');
+
+                sendLog('WARN', ['[拦截引擎报错弹窗]', text]);
+
+                if (text.indexOf('Error:') === 0 || text.indexOf('file not found') !== -1 || text.indexOf('見つかりません') !== -1 || text.indexOf('誤りがあります') !== -1) {
+
+                    setTimeout(function() {
+
+                        try {
+
+                            recoverStuckUiState();
+
+                            if (window.TYRANO && window.TYRANO.kag && window.TYRANO.kag.ftag && text.indexOf('見つかりません') !== -1) {
+
+                                window.TYRANO.kag.ftag.nextOrder();
+
+                            }
+
+                        } catch (e) {}
+
+                    }, 30);
+
+                    return;
+
+                }
+
+                if (_origWindowAlert) {
+
+                    try { _origWindowAlert.call(window, msg); } catch (e) {}
+
+                }
+
+            };
+
+
+
+            // 2. 独立命名空间隔离的原生持久化存档（支持游戏内返回标题/location.reload 实时拉取最新存档，绝不回档）
+
+            var _bootNativeSaves = \(initialSavesJSON) || {};
+
+            function pullLiveSavesFromServer() {
+
+                var merged = {};
+
+                try {
+
+                    for (var bk in _bootNativeSaves) {
+
+                        if (Object.prototype.hasOwnProperty.call(_bootNativeSaves, bk)) {
+
+                            merged[bk] = _bootNativeSaves[bk];
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+                try {
+
+                    var sessRaw = window.sessionStorage.getItem('__TYRANO_ALL_SAVES_' + GAME_UUID);
+
+                    if (sessRaw) {
+
+                        var sessMap = JSON.parse(sessRaw);
+
+                        if (sessMap && typeof sessMap === 'object') {
+
+                            for (var sk in sessMap) {
+
+                                if (Object.prototype.hasOwnProperty.call(sessMap, sk)) {
+
+                                    merged[sk] = sessMap[sk];
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+                try {
+
+                    if (window.location && window.location.protocol && window.location.protocol.indexOf('http') === 0) {
+
+                        var xhr = new XMLHttpRequest();
+
+                        xhr.open('GET', '/__tyrano_native_saves__.json?_t=' + Date.now(), false);
+
+                        xhr.send(null);
+
+                        if (xhr.status === 200 && xhr.responseText) {
+
+                            var liveMap = JSON.parse(xhr.responseText);
+
+                            if (liveMap && typeof liveMap === 'object') {
+
+                                for (var lk in liveMap) {
+
+                                    if (Object.prototype.hasOwnProperty.call(liveMap, lk)) {
+
+                                        merged[lk] = liveMap[lk];
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+                return merged;
+
+            }
+
+            window.__TYRANO_NATIVE_SAVES__ = pullLiveSavesFromServer();
 
             window.__TYRANO_MEM_CACHE__ = {};
 
@@ -852,6 +1030,12 @@ struct WebPlayerView: UIViewRepresentable {
                 window.__TYRANO_NATIVE_SAVES__[shortKey] = strVal;
 
                 window.__TYRANO_NATIVE_SAVES__[nsKey] = strVal;
+
+                try {
+
+                    window.sessionStorage.setItem('__TYRANO_ALL_SAVES_' + GAME_UUID, JSON.stringify(window.__TYRANO_NATIVE_SAVES__));
+
+                } catch (e) {}
 
                 try {
 
@@ -1321,6 +1505,30 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            var SAVELOAD_EX_SAVE_HTML_FALLBACK = '<div class="save saveload_ex"><img class="menu_item menu_close" src="data/others/plugin/saveload_ex/image/back.png" /><div style="clear:both"></div><img class="button_smart button_arrow_up" src="data/others/plugin/saveload_ex/image/arrow_up.png" style="cursor:pointer;" /><img class="button_smart button_arrow_down" src="data/others/plugin/saveload_ex/image/arrow_down.png" style="cursor:pointer;" /><div class="area_page_list"></div><div class="area_save_list"><script class="save_list_item" type="text/x-jsrender"><ul class="save_list">{{for array_save}}<li class="save_display_area save_list_item" data-num="{{:num}}" data-page="{{:page}}"><span class="save_list_item_num">{{:num+1}}</span><span class="save_list_item_thumb">{{if img_data != ""}}<img src="{{:img_data}}">{{else}}<span class="no_image">NO DATA</span>{{/if}}</span><span class="save_list_item_area"><span class="save_list_item_date">{{:save_date}}</span><span class="save_list_item_text">{{:title}}</span></span><span class="save_list_item_Lock" data-num="{{:num}}" data-lock="{{:lock}}"></span><span class="save_list_item_delete" data-num="{{:num}}"></span><input class="save_list_item_comment" type="text" data-num="{{:num}}" placeholder="備註" value="{{:comment}}"></li>{{/for}}</ul></' + 'script></div><img class="img_bg_base" src="data/others/plugin/saveload_ex/image/bg_save.png" data-type="save" /></div>';
+
+            var SAVELOAD_EX_LOAD_HTML_FALLBACK = '<div class="load saveload_ex"><img class="menu_item menu_close" src="data/others/plugin/saveload_ex/image/back.png" /><div style="clear:both"></div><img class="button_smart button_arrow_up" src="data/others/plugin/saveload_ex/image/arrow_up.png" style="cursor:pointer;" /><img class="button_smart button_arrow_down" src="data/others/plugin/saveload_ex/image/arrow_down.png" style="cursor:pointer;" /><div class="area_page_list"></div><div class="area_save_list"><script class="save_list_item" type="text/x-jsrender"><ul class="save_list">{{for array_save}}<li class="save_display_area save_list_item" data-num="{{:num}}" data-page="{{:page}}"><span class="save_list_item_num">{{:num+1}}</span><span class="save_list_item_thumb">{{if img_data != ""}}<img src="{{:img_data}}">{{else}}<span class="no_image">NO DATA</span>{{/if}}</span><span class="save_list_item_area"><span class="save_list_item_date">{{:save_date}}</span><span class="save_list_item_text">{{:title}}</span></span><span class="save_list_item_Lock" data-num="{{:num}}" data-lock="{{:lock}}"></span><span class="save_list_item_delete" data-num="{{:num}}"></span><input class="save_list_item_comment" type="text" data-num="{{:num}}" placeholder="備註" value="{{:comment}}"></li>{{/for}}</ul></' + 'script></div><img class="img_bg_base" src="data/others/plugin/saveload_ex/image/bg_load.png" data-type="load" /></div>';
+
+
+
+            function getBuiltinHtmlFallback(pathStr) {
+
+                var lower = String(pathStr || '').toLowerCase();
+
+                if (lower.indexOf('saveload_ex') !== -1) {
+
+                    if (lower.indexOf('save.html') !== -1) return SAVELOAD_EX_SAVE_HTML_FALLBACK;
+
+                    if (lower.indexOf('load.html') !== -1) return SAVELOAD_EX_LOAD_HTML_FALLBACK;
+
+                }
+
+                return null;
+
+            }
+
+
+
             function decodeSaveStr(raw) {
 
                 if (raw === null || raw === undefined || raw === '' || raw === 'null' || raw === 'undefined') return null;
@@ -1328,6 +1536,14 @@ struct WebPlayerView: UIViewRepresentable {
                 var s = String(raw);
 
                 if (s.charAt(0) === '{' || s.charAt(0) === '[') return s;
+
+                try {
+
+                    var decUri = decodeURIComponent(s);
+
+                    if (decUri && (decUri.charAt(0) === '{' || decUri.charAt(0) === '[')) return decUri;
+
+                } catch (e) {}
 
                 try {
 
@@ -1383,13 +1599,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                 var json = typeof val === 'string' ? val : JSON.stringify(val);
 
-                return escape(json);
+                try { return encodeURIComponent(json); } catch (e) { return escape(json); }
 
             }
 
 
 
-            // 剧本纯内存缓存池：同一 .ks / .tjs 剧本在摸头结束、跨天或循环跳转时 0ms 直接从 JS 内存返回，消除重复网络请求
+            // 剧本与界面模板纯内存缓存池：同一 .ks / .tjs / .html 模板在摸头结束、跨天或打开存读档界面时 0ms 直接从 JS 内存返回
 
             var _ksTextMemoryCache = {};
 
@@ -1431,7 +1647,7 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // (B) 接管所有存档读写函数，屏蔽 Windows 本地 .sav 文件读写
+                    // (B) 接管所有存档读写函数（包括顶层 $.setStorage / $.getStorage），确保任何插件调用都 100% 落盘到 iOS 原生磁盘
 
                     var safeSetStorage = function(key, val) {
 
@@ -1445,7 +1661,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                     };
 
-                    var storageMethods = ['setStorageWeb', 'setStorageCompress', 'setStorageFile'];
+                    var storageMethods = ['setStorage', 'setStorageWeb', 'setStorageCompress', 'setStorageFile'];
 
                     for (var sm = 0; sm < storageMethods.length; sm++) {
 
@@ -1467,7 +1683,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                     }
 
-                    var getMethods = ['getStorageWeb', 'getStorageCompress', 'getStorageFile'];
+                    var getMethods = ['getStorage', 'getStorageWeb', 'getStorageCompress', 'getStorageFile'];
 
                     for (var gm = 0; gm < getMethods.length; gm++) {
 
@@ -1491,27 +1707,27 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // (C) 单次非递归拦截 $.loadText + .ks/.tjs 剧本内存直返缓存（不发起任何后台预加载风暴，确保秒进游戏与 0ms 剧本跳转）
+                    // (C) 强化 $.loadText：支持 .ks/.tjs/.html 内存缓存 + 异步失败时自动同步 XHR 重试 + 内置 saveload_ex 模板兜底
 
                     var _origLoadText = undefined;
 
                     var _safeLoadTextWrapper = function(file_path, callback) {
 
-                        if (typeof _origLoadText !== 'function') return undefined;
-
                         var pathStr = String(file_path || '');
 
                         var cleanKey = pathStr.split('?')[0].split('#')[0];
+
+                        if (cleanKey.indexOf('./') === 0) cleanKey = cleanKey.slice(2);
 
                         var lowerPath = cleanKey.toLowerCase();
 
                         var isConfig = lowerPath.indexOf('config.tjs') !== -1;
 
-                        var isCacheableScript = isConfig || lowerPath.endsWith('.ks') || lowerPath.endsWith('.tjs');
+                        var isCacheableText = isConfig || lowerPath.endsWith('.ks') || lowerPath.endsWith('.tjs') || lowerPath.endsWith('.html');
 
 
 
-                        if (isCacheableScript && Object.prototype.hasOwnProperty.call(_ksTextMemoryCache, cleanKey)) {
+                        if (isCacheableText && Object.prototype.hasOwnProperty.call(_ksTextMemoryCache, cleanKey) && _ksTextMemoryCache[cleanKey]) {
 
                             var cachedStr = _ksTextMemoryCache[cleanKey];
 
@@ -1537,33 +1753,85 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                        return _origLoadText.call(jq, file_path, function(order_str) {
+                        var finalizeText = function(rawText) {
+
+                            var outText = (typeof rawText === 'string') ? rawText : '';
+
+                            if (!outText) {
+
+                                var syncFallback = xhrReadLocalFileSync(cleanKey) || getBuiltinHtmlFallback(cleanKey);
+
+                                if (syncFallback) outText = syncFallback;
+
+                            }
+
+                            if (isConfig && outText) {
+
+                                outText = sanitizeConfigTextInMemory(outText);
+
+                            }
+
+                            if (isCacheableText && outText && outText.length > 0) {
+
+                                _ksTextMemoryCache[cleanKey] = outText;
+
+                            }
 
                             try {
-
-                                if (isConfig && typeof order_str === 'string') {
-
-                                    order_str = sanitizeConfigTextInMemory(order_str);
-
-                                }
-
-                                if (isCacheableScript && typeof order_str === 'string' && order_str.length > 0) {
-
-                                    _ksTextMemoryCache[cleanKey] = order_str;
-
-                                }
 
                                 if (window.TYRANO && window.TYRANO.kag) {
 
                                     installVariableNullGuard(window.TYRANO.kag);
 
+                                    patchTyranoEngineAndPlugins();
+
                                 }
 
                             } catch (e) {}
 
-                            if (callback) callback(order_str);
+                            if (callback) callback(outText);
 
-                        });
+                        };
+
+
+
+                        if (jq.ajax) {
+
+                            jq.ajax({
+
+                                url: cleanKey,
+
+                                cache: true,
+
+                                dataType: 'text',
+
+                                success: function(text) {
+
+                                    finalizeText(text);
+
+                                },
+
+                                error: function() {
+
+                                    finalizeText('');
+
+                                }
+
+                            });
+
+                            return;
+
+                        }
+
+
+
+                        if (typeof _origLoadText === 'function') {
+
+                            return _origLoadText.call(jq, cleanKey, finalizeText);
+
+                        }
+
+                        finalizeText('');
 
                     };
 
@@ -1578,8 +1846,6 @@ struct WebPlayerView: UIViewRepresentable {
                         enumerable: true,
 
                         get: function() {
-
-                            if (typeof _origLoadText !== 'function') return undefined;
 
                             return _safeLoadTextWrapper;
 
@@ -1741,13 +2007,15 @@ struct WebPlayerView: UIViewRepresentable {
 
                     var key = String(p || '');
 
-                    if (isLegacyWindowsSaveFile(key) || key.toLowerCase().indexOf('save') !== -1) {
+                    if (isLegacyWindowsSaveFile(key)) {
 
                         return readSaveFromNative(key) !== null;
 
                     }
 
                     if (readSaveFromNative(key) !== null) return true;
+
+                    if (getBuiltinHtmlFallback(key) !== null) return true;
 
                     return xhrReadLocalFileSync(key) !== null;
 
@@ -1761,7 +2029,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                     if (saved !== null) return saved;
 
-                    if (isLegacyWindowsSaveFile(key) || key.toLowerCase().indexOf('save') !== -1) {
+                    if (isLegacyWindowsSaveFile(key)) {
 
                         return 'null';
 
@@ -1770,6 +2038,10 @@ struct WebPlayerView: UIViewRepresentable {
                     var localText = xhrReadLocalFileSync(key);
 
                     if (localText !== null) return localText;
+
+                    var fbHtml = getBuiltinHtmlFallback(key);
+
+                    if (fbHtml !== null) return fbHtml;
 
                     return '';
 
@@ -2785,6 +3057,520 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            var _patchedTyranoIfTags = false;
+
+            function patchTyranoEngineAndPlugins() {
+
+                try {
+
+                    if (!window.TYRANO || !window.TYRANO.kag) return;
+
+                    var kag = window.TYRANO.kag;
+
+                    installVariableNullGuard(kag);
+
+
+
+                    // (1) 防止 TYRANO.kag.html 将空字符串缓存在 cache_html 中导致存读档菜单空白无响应
+
+                    if (kag.html && !kag.__tyranoHtmlPatched) {
+
+                        kag.__tyranoHtmlPatched = true;
+
+                        var _origKagHtml = kag.html;
+
+                        kag.html = function(html_file_name, data, callback) {
+
+                            var that = this;
+
+                            if (this.cache_html && this.cache_html[html_file_name] === '') {
+
+                                delete this.cache_html[html_file_name];
+
+                            }
+
+                            return _origKagHtml.call(that, html_file_name, data, function(html_str) {
+
+                                if (!html_str || String(html_str).trim() === '') {
+
+                                    if (that.cache_html) delete that.cache_html[html_file_name];
+
+                                    var fb = getBuiltinHtmlFallback('saveload_ex/' + html_file_name + '.html');
+
+                                    if (fb && window.jQuery && window.jQuery.templates) {
+
+                                        try {
+
+                                            var tmpl = window.jQuery.templates(fb);
+
+                                            html_str = tmpl.render(data || {});
+
+                                        } catch (e) {}
+
+                                    }
+
+                                }
+
+                                if (typeof callback === 'function') callback(html_str);
+
+                            });
+
+                        };
+
+                    }
+
+
+
+                    // (2) 修复 TF/pre/macro_TF.ks:557行目:If文に誤りがあります（跨宏 [jump] 导致 stack['if'] 的 deep_if 偏移时自动按相对嵌套层级自愈）
+
+                    if (kag.ftag && kag.ftag.master_tag && !_patchedTyranoIfTags) {
+
+                        var mt = kag.ftag.master_tag;
+
+                        if (mt['if'] && mt['elsif'] && mt['else'] && mt['endif']) {
+
+                            _patchedTyranoIfTags = true;
+
+
+
+                            var jumpToMatchingIfBranch = function(kagInst, targetMap, startDeep) {
+
+                                var ftag = kagInst.ftag;
+
+                                var arrayTag = ftag.array_tag || [];
+
+                                var startIdx = ftag.current_order_index;
+
+
+
+                                // 第一遍：按原生 deep_if 精确匹配
+
+                                for (var i = 0; i < 2000; i++) {
+
+                                    ftag.current_order_index++;
+
+                                    if (ftag.current_order_index >= arrayTag.length) break;
+
+                                    var tag = arrayTag[ftag.current_order_index];
+
+                                    if (!tag) break;
+
+                                    if (tag.name === 'endif' && tag.deep_if == startDeep) {
+
+                                        if (targetMap['endif']) {
+
+                                            kagInst.popStack('if');
+
+                                            ftag.nextOrder();
+
+                                            return true;
+
+                                        }
+
+                                        break;
+
+                                    } else if (targetMap[tag.name] && tag.deep_if == startDeep) {
+
+                                        ftag.current_order_index--;
+
+                                        ftag.nextOrder();
+
+                                        return true;
+
+                                    }
+
+                                }
+
+
+
+                                // 第二遍：因之前在 [if] 块内执行了 [jump] 导致 deep_if 失步时，按相对 [if]...[endif] 嵌套层级自愈匹配
+
+                                var nest = 0;
+
+                                for (var idx = startIdx + 1; idx < arrayTag.length; idx++) {
+
+                                    var t = arrayTag[idx];
+
+                                    if (!t) continue;
+
+                                    if (t.name === 'if') {
+
+                                        nest++;
+
+                                    } else if (t.name === 'endif') {
+
+                                        if (nest === 0) {
+
+                                            ftag.current_order_index = idx;
+
+                                            if (kagInst.getStack('if')) kagInst.popStack('if');
+
+                                            sendLog('WARN', ['[脚本自愈] 已自动修复跨宏跳转导致的 If 栈深度偏移 (line ' + (t.line || '') + ')']);
+
+                                            ftag.nextOrder();
+
+                                            return true;
+
+                                        }
+
+                                        nest--;
+
+                                    } else if ((t.name === 'elsif' || t.name === 'else') && nest === 0 && targetMap[t.name]) {
+
+                                        var topSt = kagInst.getStack('if');
+
+                                        if (topSt) {
+
+                                            topSt.deep = t.deep_if;
+
+                                        } else {
+
+                                            kagInst.pushStack('if', { bool: false, deep: t.deep_if });
+
+                                        }
+
+                                        ftag.current_order_index = idx - 1;
+
+                                        ftag.nextOrder();
+
+                                        return true;
+
+                                    }
+
+                                }
+
+
+
+                                ftag.current_order_index = Math.min(startIdx + 1, Math.max(0, arrayTag.length - 1));
+
+                                ftag.nextOrder();
+
+                                return true;
+
+                            };
+
+
+
+                            mt['if'].start = function(pm) {
+
+                                var bool = false;
+
+                                try { bool = this.kag.embScript(pm.exp); } catch (e) { bool = false; }
+
+                                if (bool) {
+
+                                    this.kag.pushStack('if', { bool: true, deep: pm.deep_if });
+
+                                    this.kag.ftag.nextOrder();
+
+                                } else {
+
+                                    this.kag.pushStack('if', { bool: false, deep: pm.deep_if });
+
+                                    jumpToMatchingIfBranch(this.kag, { 'else': 1, 'elsif': 1, 'endif': 1 }, pm.deep_if);
+
+                                }
+
+                            };
+
+
+
+                            mt['elsif'].start = function(pm) {
+
+                                var stackIf = this.kag.getStack('if');
+
+                                if (!stackIf) {
+
+                                    stackIf = { bool: false, deep: pm.deep_if };
+
+                                    this.kag.pushStack('if', stackIf);
+
+                                } else if (stackIf.deep != pm.deep_if) {
+
+                                    stackIf.deep = pm.deep_if;
+
+                                }
+
+                                if (stackIf.bool === false) {
+
+                                    var bool = false;
+
+                                    try { bool = this.kag.embScript(pm.exp); } catch (e) { bool = false; }
+
+                                    if (bool) {
+
+                                        this.kag.setStack('if', { bool: true, deep: pm.deep_if });
+
+                                        this.kag.ftag.nextOrder();
+
+                                        return;
+
+                                    }
+
+                                }
+
+                                jumpToMatchingIfBranch(this.kag, { 'else': 1, 'elsif': 1, 'endif': 1 }, pm.deep_if);
+
+                            };
+
+
+
+                            mt['else'].start = function(pm) {
+
+                                var stackIf = this.kag.getStack('if');
+
+                                if (!stackIf) {
+
+                                    stackIf = { bool: false, deep: pm.deep_if };
+
+                                    this.kag.pushStack('if', stackIf);
+
+                                } else if (stackIf.deep != pm.deep_if) {
+
+                                    stackIf.deep = pm.deep_if;
+
+                                }
+
+                                if (stackIf.bool === false) {
+
+                                    this.kag.setStack('if', { bool: true, deep: pm.deep_if });
+
+                                    this.kag.ftag.nextOrder();
+
+                                } else {
+
+                                    jumpToMatchingIfBranch(this.kag, { 'endif': 1 }, pm.deep_if);
+
+                                }
+
+                            };
+
+
+
+                            mt['endif'].start = function() {
+
+                                if (this.kag.getStack('if')) {
+
+                                    this.kag.popStack('if');
+
+                                }
+
+                                this.kag.ftag.nextOrder();
+
+                            };
+
+                        }
+
+                    }
+
+
+
+                    // (3) 增强 TYRANO.kag.menu (修复 saveload_ex 插件在 that.snap 为 null 或缩略图超时导致存档失败的问题)
+
+                    if (kag.menu && kag.menu.doSave && !kag.menu.__tyranoSaveMenuPatched) {
+
+                        var menu = kag.menu;
+
+                        var isSaveloadReady = (kag.variable && kag.variable.sf && kag.variable.sf._saveload) ||
+
+                                              (String(menu.doSave).indexOf('comment') !== -1) ||
+
+                                              document.readyState === 'complete';
+
+                        if (isSaveloadReady) {
+
+                            menu.__tyranoSaveMenuPatched = true;
+
+                            var ensureSaveloadConfig = function() {
+
+                                try {
+
+                                    if (!kag.variable) kag.variable = {};
+
+                                    if (!kag.variable.sf) kag.variable.sf = {};
+
+                                    if (!kag.variable.sf._saveload) {
+
+                                        kag.variable.sf._saveload = {
+
+                                            memory: false, quick: 1, exsave: 0, Slot: 0, style: 1, Page: 20,
+
+                                            slot_var: '', dialog: false, dialog_overwrite: false,
+
+                                            save_sound: '', load_sound: '', fade_time: 0
+
+                                        };
+
+                                    }
+
+                                } catch (e) {}
+
+                            };
+
+                            var buildFallbackSnap = function(titleStr) {
+
+                                var jq = window.jQuery || window.$;
+
+                                var _stat = (kag.stat && jq && jq.cloneObject) ? jq.extend(true, {}, jq.cloneObject(kag.stat)) : (kag.stat || {});
+
+                                var _three = (kag.tmp && kag.tmp.three && jq && jq.cloneObject) ? jq.extend(true, {}, jq.cloneObject(kag.tmp.three)) : {};
+
+                                var nowStr = (jq && jq.getNowDate && jq.getNowTime) ? (jq.getNowDate() + '　' + jq.getNowTime()) : new Date().toLocaleString();
+
+                                return {
+
+                                    title: titleStr || (kag.stat && kag.stat.current_save_str) || 'Save',
+
+                                    current_order_index: (kag.ftag && kag.ftag.current_order_index) || 0,
+
+                                    save_date: nowStr,
+
+                                    img_data: TRANSPARENT_PLACEHOLDER_PNG,
+
+                                    stat: _stat,
+
+                                    three: _three,
+
+                                    layer: { map_layer_fore: {}, map_layer_back: {} }
+
+                                };
+
+                            };
+
+
+
+                            var _origSnapSave = menu.snapSave;
+
+                            menu.snapSave = function(title, call_back, flag_thumb) {
+
+                                var that = this;
+
+                                ensureSaveloadConfig();
+
+                                var done = false;
+
+                                var timer = setTimeout(function() {
+
+                                    if (!done) {
+
+                                        done = true;
+
+                                        if (!that.snap) that.snap = buildFallbackSnap(title);
+
+                                        if (typeof call_back === 'function') call_back();
+
+                                    }
+
+                                }, 700);
+
+                                try {
+
+                                    _origSnapSave.call(that, title, function() {
+
+                                        if (!done) {
+
+                                            done = true;
+
+                                            clearTimeout(timer);
+
+                                            if (!that.snap) that.snap = buildFallbackSnap(title);
+
+                                            if (typeof call_back === 'function') call_back();
+
+                                        }
+
+                                    }, flag_thumb);
+
+                                } catch (e) {
+
+                                    if (!done) {
+
+                                        done = true;
+
+                                        clearTimeout(timer);
+
+                                        that.snap = buildFallbackSnap(title);
+
+                                        if (typeof call_back === 'function') call_back();
+
+                                    }
+
+                                }
+
+                            };
+
+
+
+                            var _origDoSave = menu.doSave;
+
+                            menu.doSave = function(num, cb) {
+
+                                var that = this;
+
+                                ensureSaveloadConfig();
+
+                                if (!that.snap) {
+
+                                    that.snap = buildFallbackSnap((kag.stat && kag.stat.current_save_str) || 'Save');
+
+                                }
+
+                                try {
+
+                                    var r = _origDoSave.call(that, num, function(saveData) {
+
+                                        try { kag.saveSystemVariable(); } catch (e) {}
+
+                                        if (typeof cb === 'function') cb(saveData);
+
+                                    });
+
+                                    try { kag.saveSystemVariable(); } catch (e) {}
+
+                                    return r;
+
+                                } catch (err) {
+
+                                    sendLog('WARN', ['[存档保护] doSave 异常，已执行安全存档写入:', String(err)]);
+
+                                    try {
+
+                                        var jq = window.jQuery || window.$;
+
+                                        var arraySave = that.getSaveData();
+
+                                        var data = that.snap || buildFallbackSnap('Save');
+
+                                        data.save_date = (jq && jq.getNowDate && jq.getNowTime) ? (jq.getNowDate() + '　' + jq.getNowTime()) : new Date().toLocaleString();
+
+                                        data.lock = (arraySave.data[num] && arraySave.data[num].lock) || false;
+
+                                        data.comment = (arraySave.data[num] && arraySave.data[num].comment) || '';
+
+                                        arraySave.data[num] = data;
+
+                                        jq.setStorage(kag.config.projectID + '_tyrano_data', arraySave, kag.config.configSave);
+
+                                        kag.saveSystemVariable();
+
+                                        if (typeof cb === 'function') cb(data);
+
+                                    } catch (e2) {}
+
+                                }
+
+                            };
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
             function hookTyranoStorageAndSF() {
 
                 injectEarlyBaseCSS();
@@ -2797,7 +3583,19 @@ struct WebPlayerView: UIViewRepresentable {
 
                 }
 
+                patchTyranoEngineAndPlugins();
+
             }
+
+
+
+            var _enginePatchInterval = setInterval(function() {
+
+                hookTyranoStorageAndSF();
+
+            }, 350);
+
+            setTimeout(function() { clearInterval(_enginePatchInterval); }, 30000);
 
 
 
@@ -3229,6 +4027,26 @@ struct WebPlayerView: UIViewRepresentable {
 
             )
 
+            NotificationCenter.default.addObserver(
+
+                self,
+
+                selector: #selector(handleAppWillResignActive),
+
+                name: UIApplication.willResignActiveNotification,
+
+                object: nil
+
+            )
+
+        }
+
+
+
+        @objc private func handleAppWillResignActive() {
+
+            persistSaveDict(immediate: true)
+
         }
 
 
@@ -3267,6 +4085,8 @@ struct WebPlayerView: UIViewRepresentable {
 
             }
 
+            LocalGameHTTPServer.shared.replaceLiveSaves(self.saveDict)
+
         }
 
 
@@ -3284,6 +4104,8 @@ struct WebPlayerView: UIViewRepresentable {
             saveWriteWorkItem?.cancel()
 
             let snapshot = self.saveDict
+
+            LocalGameHTTPServer.shared.replaceLiveSaves(snapshot)
 
             let targetURL = self.nativeSaveStoreURL
 
@@ -3551,13 +4373,15 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-/// 高性能本机 HTTP 游戏资源服务器（v1.7.0 极速版）：
+/// 高性能本机 HTTP 游戏资源服务器（v1.8.0 长时间游玩防崩与存档增强版）：
 
-/// 1. 支持 HTTP/1.1 Keep-Alive 长连接复用，消除启动与转场时数十个 JS/CSS/PNG 请求反复 TCP 握手的延迟
+/// 1. 自动将 iOS 进程文件描述符上限从默认 256 提升至 4096，并移除 .mappedIfSafe 句柄驻留，彻底解决游玩 15~20 分钟后 status.png / save.html 突然报 file not found 的问题
 
-/// 2. 针对 &lt;video&gt; / &lt;audio&gt; 的 HTTP 206 Range 请求采用 FileHandle 按需偏移直读（如 bytes=0-1 仅读 2 字节，耗时 <0.05ms），彻底解决开幕动画前半段卡住、只能看到最后一点的问题
+/// 2. 消除 2 秒空闲超时断开 Keep-Alive 引起的连接重置竞争，确保阅读对话后点击存读档 100% 稳定加载
 
-/// 3. 内置受系统内存自动管理的 NSCache 64MB 静态资源缓存池 + O(1) 路径缓存 + ETag 304 秒回，彻底消除摸头结束/跨天/CG切换时的磁盘读取卡顿
+/// 3. 对缺失的可选图标（如 button_menu.png 或拼写差异的 culumn1.png）直接返回 200 OK 1x1 透明 PNG，从根源上防止 img.onerror 导致右侧操作按钮消失无响应
+
+/// 4. 提供 /__tyrano_native_saves__.json 实时存档同步端点，确保游戏内返回标题或重载页面绝不丢失当前会话新存档
 
 final class LocalGameHTTPServer: @unchecked Sendable {
 
@@ -3581,17 +4405,43 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
     private var sanitizedTextCache: [String: Data] = [:]
 
+    private var liveSavesSnapshot: [String: String] = [:]
+
     private let assetMemoryCache: NSCache<NSString, NSData> = {
 
         let cache = NSCache<NSString, NSData>()
 
-        cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB 自动受系统管理
+        cache.totalCostLimit = 48 * 1024 * 1024 // 48 MB 自动受系统管理
 
-        cache.countLimit = 300
+        cache.countLimit = 240
 
         return cache
 
     }()
+
+
+
+    private static let transparentPNGData: Data = Data(
+
+        base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+    ) ?? Data()
+
+
+
+    private static let saveloadExSaveHTMLData: Data = Data("""
+
+    <div class="save saveload_ex"><img class="menu_item menu_close" src="data/others/plugin/saveload_ex/image/back.png" /><div style="clear:both"></div><img class="button_smart button_arrow_up" src="data/others/plugin/saveload_ex/image/arrow_up.png" style="cursor:pointer;" /><img class="button_smart button_arrow_down" src="data/others/plugin/saveload_ex/image/arrow_down.png" style="cursor:pointer;" /><div class="area_page_list"></div><div class="area_save_list"><script class="save_list_item" type="text/x-jsrender"><ul class="save_list">{{for array_save}}<li class="save_display_area save_list_item" data-num="{{:num}}" data-page="{{:page}}"><span class="save_list_item_num">{{:num+1}}</span><span class="save_list_item_thumb">{{if img_data != ""}}<img src="{{:img_data}}">{{else}}<span class="no_image">NO DATA</span>{{/if}}</span><span class="save_list_item_area"><span class="save_list_item_date">{{:save_date}}</span><span class="save_list_item_text">{{:title}}</span></span><span class="save_list_item_Lock" data-num="{{:num}}" data-lock="{{:lock}}"></span><span class="save_list_item_delete" data-num="{{:num}}"></span><input class="save_list_item_comment" type="text" data-num="{{:num}}" placeholder="備註" value="{{:comment}}"></li>{{/for}}</ul></script></div><img class="img_bg_base" src="data/others/plugin/saveload_ex/image/bg_save.png" data-type="save" /></div>
+
+    """.utf8)
+
+
+
+    private static let saveloadExLoadHTMLData: Data = Data("""
+
+    <div class="load saveload_ex"><img class="menu_item menu_close" src="data/others/plugin/saveload_ex/image/back.png" /><div style="clear:both"></div><img class="button_smart button_arrow_up" src="data/others/plugin/saveload_ex/image/arrow_up.png" style="cursor:pointer;" /><img class="button_smart button_arrow_down" src="data/others/plugin/saveload_ex/image/arrow_down.png" style="cursor:pointer;" /><div class="area_page_list"></div><div class="area_save_list"><script class="save_list_item" type="text/x-jsrender"><ul class="save_list">{{for array_save}}<li class="save_display_area save_list_item" data-num="{{:num}}" data-page="{{:page}}"><span class="save_list_item_num">{{:num+1}}</span><span class="save_list_item_thumb">{{if img_data != ""}}<img src="{{:img_data}}">{{else}}<span class="no_image">NO DATA</span>{{/if}}</span><span class="save_list_item_area"><span class="save_list_item_date">{{:save_date}}</span><span class="save_list_item_text">{{:title}}</span></span><span class="save_list_item_Lock" data-num="{{:num}}" data-lock="{{:lock}}"></span><span class="save_list_item_delete" data-num="{{:num}}"></span><input class="save_list_item_comment" type="text" data-num="{{:num}}" placeholder="備註" value="{{:comment}}"></li>{{/for}}</ul></script></div><img class="img_bg_base" src="data/others/plugin/saveload_ex/image/bg_load.png" data-type="load" /></div>
+
+    """.utf8)
 
 
 
@@ -3601,7 +4451,45 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-    private init() {}
+    private init() {
+
+        Self.raiseFileDescriptorLimit()
+
+    }
+
+
+
+    private static func raiseFileDescriptorLimit() {
+
+        var limit = rlimit()
+
+        if getrlimit(RLIMIT_NOFILE, &limit) == 0 {
+
+            let targetCur: rlim_t = 4096
+
+            if limit.rlim_cur < targetCur {
+
+                limit.rlim_cur = min(targetCur, limit.rlim_max)
+
+                _ = setrlimit(RLIMIT_NOFILE, &limit)
+
+            }
+
+        }
+
+    }
+
+
+
+    func replaceLiveSaves(_ dict: [String: String]) {
+
+        lock.lock()
+
+        liveSavesSnapshot = dict
+
+        lock.unlock()
+
+    }
 
 
 
@@ -3622,6 +4510,8 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
     func startAndMakeEntryURL(rootDirectoryURL: URL, entryHTMLURL: URL) -> URL? {
+
+        Self.raiseFileDescriptorLimit()
 
         let stdRoot = rootDirectoryURL.standardizedFileURL
 
@@ -3813,6 +4703,22 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
             if clientSock < 0 {
 
+                let err = errno
+
+                if err == EINTR || err == EAGAIN || err == EWOULDBLOCK {
+
+                    continue
+
+                }
+
+                if err == EMFILE || err == ENFILE {
+
+                    usleep(40_000)
+
+                    continue
+
+                }
+
                 lock.lock()
 
                 let stillRunning = isRunning && (serverSocket == listenSocket)
@@ -3839,9 +4745,11 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
             _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, &sendBufSize, socklen_t(MemoryLayout<Int32>.size))
 
-            var tv = timeval(tv_sec: 2, tv_usec: 0)
+            var tv = timeval(tv_sec: 15, tv_usec: 0)
 
             _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+            _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
 
 
@@ -3852,6 +4760,36 @@ final class LocalGameHTTPServer: @unchecked Sendable {
             }
 
         }
+
+    }
+
+
+
+    private static func normalizeRelativeRequestPath(_ rawPath: String) -> String {
+
+        let unified = rawPath.replacingOccurrences(of: "\\", with: "/")
+
+        var stack: [String] = []
+
+        for part in unified.split(separator: "/", omittingEmptySubsequences: true) {
+
+            if part == "." {
+
+                continue
+
+            } else if part == ".." {
+
+                if !stack.isEmpty { stack.removeLast() }
+
+            } else {
+
+                stack.append(String(part))
+
+            }
+
+        }
+
+        return stack.joined(separator: "/")
 
     }
 
@@ -3871,367 +4809,91 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         var recvBuffer = [UInt8](repeating: 0, count: 16384)
 
-        var requestsServed = 0
 
 
+        while pendingData.range(of: headerTerminator) == nil && pendingData.count < 65536 {
 
-        // HTTP/1.1 Keep-Alive 循环：单条 TCP 连接可连续高速处理最多 64 个请求，彻底消除重复握手开销
+            let n = Darwin.recv(clientSock, &recvBuffer, recvBuffer.count, 0)
 
-        while requestsServed < 64 {
+            if n < 0 {
 
-            while pendingData.range(of: headerTerminator) == nil && pendingData.count < 65536 {
-
-                let n = Darwin.recv(clientSock, &recvBuffer, recvBuffer.count, 0)
-
-                if n <= 0 { return }
-
-                pendingData.append(recvBuffer, count: n)
-
-            }
-
-
-
-            guard let termRange = pendingData.range(of: headerTerminator) else { return }
-
-            let requestHeaderData = pendingData.subdata(in: 0..<termRange.lowerBound)
-
-            pendingData.removeSubrange(0..<termRange.upperBound)
-
-            requestsServed += 1
-
-
-
-            guard let headerText = String(data: requestHeaderData, encoding: .utf8) ?? String(data: requestHeaderData, encoding: .isoLatin1) else {
+                if errno == EINTR { continue }
 
                 return
 
             }
 
+            if n == 0 { break }
 
+            pendingData.append(recvBuffer, count: n)
 
-            let lines = headerText.components(separatedBy: crlf)
-
-            guard let requestLine = lines.first else { return }
-
-            let parts = requestLine.split(separator: " ")
-
-            guard parts.count >= 2 else { return }
+        }
 
 
 
-            let method = String(parts[0]).uppercased()
+        guard let termRange = pendingData.range(of: headerTerminator) else { return }
 
-            var clientWantsClose = false
-
-            var ifNoneMatch: String?
-
-            var rangeHeader: String?
+        let requestHeaderData = pendingData.subdata(in: 0..<termRange.lowerBound)
 
 
 
-            for line in lines.dropFirst() {
+        guard let headerText = String(data: requestHeaderData, encoding: .utf8) ?? String(data: requestHeaderData, encoding: .isoLatin1) else {
 
-                let lowerLine = line.lowercased()
+            return
 
-                if lowerLine.hasPrefix("range:") {
-
-                    rangeHeader = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
-
-                } else if lowerLine.hasPrefix("if-none-match:") {
-
-                    ifNoneMatch = line.dropFirst(14).trimmingCharacters(in: .whitespaces)
-
-                } else if lowerLine.hasPrefix("connection:") {
-
-                    let connVal = lowerLine.dropFirst(11).trimmingCharacters(in: .whitespaces)
-
-                    if connVal.contains("close") { clientWantsClose = true }
-
-                }
-
-            }
+        }
 
 
 
-            let connHeaderVal = clientWantsClose ? "close" : "keep-alive"
+        let lines = headerText.components(separatedBy: crlf)
+
+        guard let requestLine = lines.first else { return }
+
+        let parts = requestLine.split(separator: " ")
+
+        guard parts.count >= 2 else { return }
 
 
 
-            if method == "OPTIONS" {
+        let method = String(parts[0]).uppercased()
 
-                let resp = [
+        var ifNoneMatch: String?
 
-                    "HTTP/1.1 200 OK",
+        var rangeHeader: String?
 
-                    "Access-Control-Allow-Origin: *",
 
-                    "Access-Control-Allow-Methods: GET, HEAD, OPTIONS",
 
-                    "Content-Length: 0",
+        for line in lines.dropFirst() {
 
-                    "Connection: \(connHeaderVal)",
+            let lowerLine = line.lowercased()
 
-                    "",
+            if lowerLine.hasPrefix("range:") {
 
-                    ""
+                rangeHeader = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
 
-                ].joined(separator: crlf)
+            } else if lowerLine.hasPrefix("if-none-match:") {
 
-                if !sendAll(socket: clientSock, data: Data(resp.utf8)) || clientWantsClose { return }
-
-                continue
+                ifNoneMatch = line.dropFirst(14).trimmingCharacters(in: .whitespaces)
 
             }
 
+        }
 
 
-            var rawTarget = String(parts[1])
 
-            if let qIdx = rawTarget.firstIndex(of: "?") {
+        if method == "OPTIONS" {
 
-                rawTarget = String(rawTarget[..<qIdx])
-
-            }
-
-            if let hIdx = rawTarget.firstIndex(of: "#") {
-
-                rawTarget = String(rawTarget[..<hIdx])
-
-            }
-
-            let decodedPath = rawTarget.removingPercentEncoding ?? rawTarget
-
-            let cleanRelPath = decodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-
-
-
-            lock.lock()
-
-            let baseDir = self.rootDirectoryURL
-
-            lock.unlock()
-
-
-
-            guard let rootDir = baseDir,
-
-                  let resolvedFileURL = resolveLocalFile(in: rootDir, relativePath: cleanRelPath) else {
-
-                let notFound = [
-
-                    "HTTP/1.1 404 Not Found",
-
-                    "Access-Control-Allow-Origin: *",
-
-                    "Content-Length: 0",
-
-                    "Connection: \(connHeaderVal)",
-
-                    "",
-
-                    ""
-
-                ].joined(separator: crlf)
-
-                if !sendAll(socket: clientSock, data: Data(notFound.utf8)) || clientWantsClose { return }
-
-                continue
-
-            }
-
-
-
-            let ext = resolvedFileURL.pathExtension.lowercased()
-
-            let mime = mimeType(for: ext)
-
-            let cachePolicy = cacheControlHeader(for: ext)
-
-
-
-            // 优先针对带 Range 请求头的音视频流（如开幕动画 <video> / BGM）使用 FileHandle 偏移直读，绝不把几十 MB 视频反复全量读入内存
-
-            if ext != "tjs" && ext != "ks", let rangeStr = rangeHeader, rangeStr.lowercased().hasPrefix("bytes=") {
-
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: resolvedFileURL.path)[.size] as? Int) ?? 0
-
-                if fileSize > 0 {
-
-                    let quoteChar = String(UnicodeScalar(34))
-
-                    let etag = quoteChar + "\(fileSize)-\(abs(resolvedFileURL.lastPathComponent.hashValue))" + quoteChar
-
-                    let spec = rangeStr.dropFirst(6)
-
-                    let rangeParts = spec.split(separator: "-", omittingEmptySubsequences: false)
-
-                    if rangeParts.count == 2 {
-
-                        let startVal = Int(rangeParts[0]) ?? 0
-
-                        let endVal = rangeParts[1].isEmpty ? (fileSize - 1) : (Int(rangeParts[1]) ?? (fileSize - 1))
-
-                        let clampedStart = max(0, min(startVal, fileSize - 1))
-
-                        let clampedEnd = max(clampedStart, min(endVal, fileSize - 1))
-
-                        let sliceLen = clampedEnd - clampedStart + 1
-
-
-
-                        let header = [
-
-                            "HTTP/1.1 206 Partial Content",
-
-                            "Content-Type: \(mime)",
-
-                            "Accept-Ranges: bytes",
-
-                            "Content-Range: bytes \(clampedStart)-\(clampedEnd)/\(fileSize)",
-
-                            "Content-Length: \(sliceLen)",
-
-                            "ETag: \(etag)",
-
-                            "Access-Control-Allow-Origin: *",
-
-                            "Cache-Control: \(cachePolicy)",
-
-                            "Connection: \(connHeaderVal)",
-
-                            "",
-
-                            ""
-
-                        ].joined(separator: crlf)
-
-                        if !sendAll(socket: clientSock, data: Data(header.utf8)) { return }
-
-                        if method != "HEAD" && sliceLen > 0 {
-
-                            if let cachedData = assetMemoryCache.object(forKey: resolvedFileURL.path as NSString) as Data?,
-
-                               clampedEnd < cachedData.count {
-
-                                let slice = cachedData.subdata(in: clampedStart..<(clampedEnd + 1))
-
-                                if !sendAll(socket: clientSock, data: slice) { return }
-
-                            } else if let fh = try? FileHandle(forReadingFrom: resolvedFileURL) {
-
-                                defer { try? fh.close() }
-
-                                _ = try? fh.seek(toOffset: UInt64(clampedStart))
-
-                                var remaining = sliceLen
-
-                                while remaining > 0 {
-
-                                    let chunkCount = min(262_144, remaining)
-
-                                    guard let chunk = try? fh.read(upToCount: chunkCount), !chunk.isEmpty else { break }
-
-                                    if !sendAll(socket: clientSock, data: chunk) { return }
-
-                                    remaining -= chunk.count
-
-                                }
-
-                            }
-
-                        }
-
-                        if clientWantsClose { return }
-
-                        continue
-
-                    }
-
-                }
-
-            }
-
-
-
-            guard let payloadData = loadAndSanitizeFileData(at: resolvedFileURL) else {
-
-                let notFound = [
-
-                    "HTTP/1.1 404 Not Found",
-
-                    "Access-Control-Allow-Origin: *",
-
-                    "Content-Length: 0",
-
-                    "Connection: \(connHeaderVal)",
-
-                    "",
-
-                    ""
-
-                ].joined(separator: crlf)
-
-                if !sendAll(socket: clientSock, data: Data(notFound.utf8)) || clientWantsClose { return }
-
-                continue
-
-            }
-
-
-
-            let totalLen = payloadData.count
-
-            let quoteChar = String(UnicodeScalar(34))
-
-            let etag = quoteChar + "\(totalLen)-\(abs(resolvedFileURL.lastPathComponent.hashValue))" + quoteChar
-
-
-
-            if rangeHeader == nil, let clientETag = ifNoneMatch, clientETag == etag, isStaticCacheableAsset(ext: ext) {
-
-                let notModified = [
-
-                    "HTTP/1.1 304 Not Modified",
-
-                    "ETag: \(etag)",
-
-                    "Cache-Control: \(cachePolicy)",
-
-                    "Access-Control-Allow-Origin: *",
-
-                    "Connection: \(connHeaderVal)",
-
-                    "",
-
-                    ""
-
-                ].joined(separator: crlf)
-
-                if !sendAll(socket: clientSock, data: Data(notModified.utf8)) || clientWantsClose { return }
-
-                continue
-
-            }
-
-
-
-            let okHeader = [
+            let resp = [
 
                 "HTTP/1.1 200 OK",
 
-                "Content-Type: \(mime)",
-
-                "Accept-Ranges: bytes",
-
-                "Content-Length: \(totalLen)",
-
-                "ETag: \(etag)",
-
                 "Access-Control-Allow-Origin: *",
 
-                "Cache-Control: \(cachePolicy)",
+                "Access-Control-Allow-Methods: GET, HEAD, OPTIONS",
 
-                "Connection: \(connHeaderVal)",
+                "Content-Length: 0",
+
+                "Connection: close",
 
                 "",
 
@@ -4239,15 +4901,401 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
             ].joined(separator: crlf)
 
-            if !sendAll(socket: clientSock, data: Data(okHeader.utf8)) { return }
+            _ = sendAll(socket: clientSock, data: Data(resp.utf8))
 
-            if method != "HEAD" && totalLen > 0 {
+            return
 
-                if !sendAll(socket: clientSock, data: payloadData) { return }
+        }
+
+
+
+        var rawTarget = String(parts[1])
+
+        if let qIdx = rawTarget.firstIndex(of: "?") {
+
+            rawTarget = String(rawTarget[..<qIdx])
+
+        }
+
+        if let hIdx = rawTarget.firstIndex(of: "#") {
+
+            rawTarget = String(rawTarget[..<hIdx])
+
+        }
+
+        let decodedPath = rawTarget.removingPercentEncoding ?? rawTarget
+
+        let cleanRelPath = Self.normalizeRelativeRequestPath(decodedPath)
+
+
+
+        // 实时存档同步端点：供游戏返回标题或刷新页面时同步拉取最新存档
+
+        if cleanRelPath == "__tyrano_native_saves__.json" {
+
+            lock.lock()
+
+            let snap = self.liveSavesSnapshot
+
+            lock.unlock()
+
+            let jsonData = (try? JSONSerialization.data(withJSONObject: snap, options: [])) ?? Data("{}".utf8)
+
+            let header = [
+
+                "HTTP/1.1 200 OK",
+
+                "Content-Type: application/json; charset=utf-8",
+
+                "Content-Length: \(jsonData.count)",
+
+                "Access-Control-Allow-Origin: *",
+
+                "Cache-Control: no-store",
+
+                "Connection: close",
+
+                "",
+
+                ""
+
+            ].joined(separator: crlf)
+
+            if sendAll(socket: clientSock, data: Data(header.utf8)) && method != "HEAD" {
+
+                _ = sendAll(socket: clientSock, data: jsonData)
 
             }
 
-            if clientWantsClose { return }
+            return
+
+        }
+
+
+
+        lock.lock()
+
+        let baseDir = self.rootDirectoryURL
+
+        lock.unlock()
+
+
+
+        guard let rootDir = baseDir else { return }
+
+
+
+        guard let resolvedFileURL = resolveLocalFile(in: rootDir, relativePath: cleanRelPath) else {
+
+            let lowerRel = cleanRelPath.lowercased()
+
+            let reqExt = (cleanRelPath as NSString).pathExtension.lowercased()
+
+
+
+            // 关键防护 1：当请求缺失的图片资源（如 button_menu.png 或拼写差异的 culumn1.png）时，
+
+            // 直接返回 HTTP 200 + 1x1 透明 PNG，使 WebKit 触发 img.onload 而非 img.onerror，彻底解决优雅降级后按钮消失无响应的问题
+
+            if ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico"].contains(reqExt) {
+
+                let pngData = Self.transparentPNGData
+
+                let header = [
+
+                    "HTTP/1.1 200 OK",
+
+                    "Content-Type: image/png",
+
+                    "Content-Length: \(pngData.count)",
+
+                    "Access-Control-Allow-Origin: *",
+
+                    "Cache-Control: no-cache",
+
+                    "Connection: close",
+
+                    "",
+
+                    ""
+
+                ].joined(separator: crlf)
+
+                if sendAll(socket: clientSock, data: Data(header.utf8)) && method != "HEAD" {
+
+                    _ = sendAll(socket: clientSock, data: pngData)
+
+                }
+
+                return
+
+            }
+
+
+
+            // 关键防护 2：内置 saveload_ex 插件 save.html / load.html 模板兜底
+
+            if lowerRel.contains("saveload_ex") && (lowerRel.hasSuffix("save.html") || lowerRel.hasSuffix("load.html")) {
+
+                let htmlData = lowerRel.hasSuffix("save.html") ? Self.saveloadExSaveHTMLData : Self.saveloadExLoadHTMLData
+
+                let header = [
+
+                    "HTTP/1.1 200 OK",
+
+                    "Content-Type: text/html; charset=utf-8",
+
+                    "Content-Length: \(htmlData.count)",
+
+                    "Access-Control-Allow-Origin: *",
+
+                    "Cache-Control: no-cache",
+
+                    "Connection: close",
+
+                    "",
+
+                    ""
+
+                ].joined(separator: crlf)
+
+                if sendAll(socket: clientSock, data: Data(header.utf8)) && method != "HEAD" {
+
+                    _ = sendAll(socket: clientSock, data: htmlData)
+
+                }
+
+                return
+
+            }
+
+
+
+            let notFound = [
+
+                "HTTP/1.1 404 Not Found",
+
+                "Access-Control-Allow-Origin: *",
+
+                "Content-Length: 0",
+
+                "Connection: close",
+
+                "",
+
+                ""
+
+            ].joined(separator: crlf)
+
+            _ = sendAll(socket: clientSock, data: Data(notFound.utf8))
+
+            return
+
+        }
+
+
+
+        let ext = resolvedFileURL.pathExtension.lowercased()
+
+        let mime = mimeType(for: ext)
+
+        let cachePolicy = cacheControlHeader(for: ext)
+
+
+
+        // 优先针对带 Range 请求头的音视频流（如开幕动画 <video> / BGM）使用 FileHandle 偏移直读
+
+        if ext != "tjs" && ext != "ks", let rangeStr = rangeHeader, rangeStr.lowercased().hasPrefix("bytes=") {
+
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: resolvedFileURL.path)[.size] as? Int) ?? 0
+
+            if fileSize > 0 {
+
+                let quoteChar = String(UnicodeScalar(34))
+
+                let etag = quoteChar + "\(fileSize)-\(abs(resolvedFileURL.lastPathComponent.hashValue))" + quoteChar
+
+                let spec = rangeStr.dropFirst(6)
+
+                let rangeParts = spec.split(separator: "-", omittingEmptySubsequences: false)
+
+                if rangeParts.count == 2 {
+
+                    let startVal = Int(rangeParts[0]) ?? 0
+
+                    let endVal = rangeParts[1].isEmpty ? (fileSize - 1) : (Int(rangeParts[1]) ?? (fileSize - 1))
+
+                    let clampedStart = max(0, min(startVal, fileSize - 1))
+
+                    let clampedEnd = max(clampedStart, min(endVal, fileSize - 1))
+
+                    let sliceLen = clampedEnd - clampedStart + 1
+
+
+
+                    let header = [
+
+                        "HTTP/1.1 206 Partial Content",
+
+                        "Content-Type: \(mime)",
+
+                        "Accept-Ranges: bytes",
+
+                        "Content-Range: bytes \(clampedStart)-\(clampedEnd)/\(fileSize)",
+
+                        "Content-Length: \(sliceLen)",
+
+                        "ETag: \(etag)",
+
+                        "Access-Control-Allow-Origin: *",
+
+                        "Cache-Control: \(cachePolicy)",
+
+                        "Connection: close",
+
+                        "",
+
+                        ""
+
+                    ].joined(separator: crlf)
+
+                    if !sendAll(socket: clientSock, data: Data(header.utf8)) { return }
+
+                    if method != "HEAD" && sliceLen > 0 {
+
+                        if let cachedData = assetMemoryCache.object(forKey: resolvedFileURL.path as NSString) as Data?,
+
+                           clampedEnd < cachedData.count {
+
+                            let slice = cachedData.subdata(in: clampedStart..<(clampedEnd + 1))
+
+                            _ = sendAll(socket: clientSock, data: slice)
+
+                        } else if let fh = try? FileHandle(forReadingFrom: resolvedFileURL) {
+
+                            defer { try? fh.close() }
+
+                            _ = try? fh.seek(toOffset: UInt64(clampedStart))
+
+                            var remaining = sliceLen
+
+                            while remaining > 0 {
+
+                                let chunkCount = min(262_144, remaining)
+
+                                guard let chunk = try? fh.read(upToCount: chunkCount), !chunk.isEmpty else { break }
+
+                                if !sendAll(socket: clientSock, data: chunk) { return }
+
+                                remaining -= chunk.count
+
+                            }
+
+                        }
+
+                    }
+
+                    return
+
+                }
+
+            }
+
+        }
+
+
+
+        guard let payloadData = loadAndSanitizeFileData(at: resolvedFileURL) else {
+
+            let notFound = [
+
+                "HTTP/1.1 404 Not Found",
+
+                "Access-Control-Allow-Origin: *",
+
+                "Content-Length: 0",
+
+                "Connection: close",
+
+                "",
+
+                ""
+
+            ].joined(separator: crlf)
+
+            _ = sendAll(socket: clientSock, data: Data(notFound.utf8))
+
+            return
+
+        }
+
+
+
+        let totalLen = payloadData.count
+
+        let quoteChar = String(UnicodeScalar(34))
+
+        let etag = quoteChar + "\(totalLen)-\(abs(resolvedFileURL.lastPathComponent.hashValue))" + quoteChar
+
+
+
+        if rangeHeader == nil, let clientETag = ifNoneMatch, clientETag == etag, isStaticCacheableAsset(ext: ext) {
+
+            let notModified = [
+
+                "HTTP/1.1 304 Not Modified",
+
+                "ETag: \(etag)",
+
+                "Cache-Control: \(cachePolicy)",
+
+                "Access-Control-Allow-Origin: *",
+
+                "Connection: close",
+
+                "",
+
+                ""
+
+            ].joined(separator: crlf)
+
+            _ = sendAll(socket: clientSock, data: Data(notModified.utf8))
+
+            return
+
+        }
+
+
+
+        let okHeader = [
+
+            "HTTP/1.1 200 OK",
+
+            "Content-Type: \(mime)",
+
+            "Accept-Ranges: bytes",
+
+            "Content-Length: \(totalLen)",
+
+            "ETag: \(etag)",
+
+            "Access-Control-Allow-Origin: *",
+
+            "Cache-Control: \(cachePolicy)",
+
+            "Connection: close",
+
+            "",
+
+            ""
+
+        ].joined(separator: crlf)
+
+        if !sendAll(socket: clientSock, data: Data(okHeader.utf8)) { return }
+
+        if method != "HEAD" && totalLen > 0 {
+
+            _ = sendAll(socket: clientSock, data: payloadData)
 
         }
 
@@ -4289,13 +5337,15 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
     private func resolveLocalFile(in rootDir: URL, relativePath: String) -> URL? {
 
-        if relativePath.isEmpty || relativePath.contains("..") { return nil }
+        let cleanRel = Self.normalizeRelativeRequestPath(relativePath)
+
+        if cleanRel.isEmpty { return nil }
 
 
 
         lock.lock()
 
-        if let cached = resolvedPathCache[relativePath] {
+        if let cached = resolvedPathCache[cleanRel] {
 
             lock.unlock()
 
@@ -4311,13 +5361,13 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        let directURL = rootDir.appendingPathComponent(relativePath)
+        let directURL = rootDir.appendingPathComponent(cleanRel)
 
         var isDir: ObjCBool = false
 
         if fm.fileExists(atPath: directURL.path, isDirectory: &isDir), !isDir.boolValue {
 
-            cacheResolvedPath(relativePath, url: directURL)
+            cacheResolvedPath(cleanRel, url: directURL)
 
             return directURL
 
@@ -4325,7 +5375,33 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        let components = relativePath.split(separator: "/").map(String.init)
+        // 兼容 saveload_ex 插件历史版本的 culumn1.png <-> column1.png 拼写差异
+
+        let lowerRel = cleanRel.lowercased()
+
+        if lowerRel.contains("culumn") || lowerRel.contains("column") {
+
+            let altRel = lowerRel.contains("culumn")
+
+                ? cleanRel.replacingOccurrences(of: "culumn", with: "column", options: .caseInsensitive)
+
+                : cleanRel.replacingOccurrences(of: "column", with: "culumn", options: .caseInsensitive)
+
+            let altURL = rootDir.appendingPathComponent(altRel)
+
+            if fm.fileExists(atPath: altURL.path, isDirectory: &isDir), !isDir.boolValue {
+
+                cacheResolvedPath(cleanRel, url: altURL)
+
+                return altURL
+
+            }
+
+        }
+
+
+
+        let components = cleanRel.split(separator: "/").map(String.init)
 
         var currentURL = rootDir
 
@@ -4341,7 +5417,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                 if idx == components.count - 1 && !subDir.boolValue {
 
-                    cacheResolvedPath(relativePath, url: currentURL)
+                    cacheResolvedPath(cleanRel, url: currentURL)
 
                     return currentURL
 
@@ -4367,13 +5443,33 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                 if idx == components.count - 1 && fm.fileExists(atPath: matched.path, isDirectory: &matchedDir) && !matchedDir.boolValue {
 
-                    cacheResolvedPath(relativePath, url: matched)
+                    cacheResolvedPath(cleanRel, url: matched)
 
                     return matched
 
                 }
 
             } else if idx == components.count - 1 {
+
+                // 检查 culumn <-> column 同目录拼写容错
+
+                if lowerComp.contains("culumn") || lowerComp.contains("column") {
+
+                    let altComp = lowerComp.contains("culumn")
+
+                        ? lowerComp.replacingOccurrences(of: "culumn", with: "column")
+
+                        : lowerComp.replacingOccurrences(of: "column", with: "culumn")
+
+                    if let altMatched = children.first(where: { $0.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == altComp }) {
+
+                        cacheResolvedPath(cleanRel, url: altMatched)
+
+                        return altMatched
+
+                    }
+
+                }
 
                 let mediaExts = [".ogg", ".m4a", ".mp3", ".wav", ".webm", ".ogv", ".mp4", ".m4v"]
 
@@ -4397,7 +5493,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                         if let fallbackFile = children.first(where: { $0.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == candName }) {
 
-                            cacheResolvedPath(relativePath, url: fallbackFile)
+                            cacheResolvedPath(cleanRel, url: fallbackFile)
 
                             return fallbackFile
 
@@ -4467,7 +5563,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-            guard let rawData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
+            // 关键修复：不使用 .mappedIfSafe，防止 mmap 长期驻留耗尽 iOS 256 文件描述符上限
+
+            guard let rawData = try? Data(contentsOf: fileURL) else { return nil }
 
             var text: String?
 
@@ -4539,9 +5637,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
-
-        // 对 6MB 以内的立绘、CG、背景、音效、JS/CSS 自动放入 NSCache 内存池，转场切回房间时 0 磁盘开销
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
 
         if data.count <= 6 * 1024 * 1024 {
 
@@ -4627,7 +5723,25 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                 let sent = Darwin.send(socket, base.advanced(by: totalSent), count - totalSent, 0)
 
-                if sent <= 0 { return false }
+                if sent < 0 {
+
+                    let err = errno
+
+                    if err == EINTR { continue }
+
+                    if err == EAGAIN || err == EWOULDBLOCK {
+
+                        usleep(2_000)
+
+                        continue
+
+                    }
+
+                    return false
+
+                }
+
+                if sent == 0 { return false }
 
                 totalSent += sent
 
