@@ -147,6 +147,8 @@ final class AppLogger: ObservableObject {
 
     private let fileManager = FileManager.default
 
+    private let logIOQueue = DispatchQueue(label: "com.tyrano.logger.io", qos: .utility)
+
 
 
     var logDirectoryURL: URL {
@@ -195,9 +197,9 @@ final class AppLogger: ObservableObject {
 
         entries.append(entry)
 
-        if entries.count > 1000 {
+        if entries.count > 600 {
 
-            entries.removeFirst(entries.count - 1000)
+            entries.removeFirst(entries.count - 600)
 
         }
 
@@ -207,21 +209,27 @@ final class AppLogger: ObservableObject {
 
         let line = "[\(timeStr)] [\(level.rawValue)] \(formatted)\n"
 
+        let targetURL = self.logFileURL
+
         if let data = line.data(using: .utf8) {
 
-            if fileManager.fileExists(atPath: logFileURL.path),
+            logIOQueue.async {
 
-               let handle = try? FileHandle(forWritingTo: logFileURL) {
+                if FileManager.default.fileExists(atPath: targetURL.path),
 
-                defer { try? handle.close() }
+                   let handle = try? FileHandle(forWritingTo: targetURL) {
 
-                _ = try? handle.seekToEnd()
+                    defer { try? handle.close() }
 
-                try? handle.write(contentsOf: data)
+                    _ = try? handle.seekToEnd()
 
-            } else {
+                    try? handle.write(contentsOf: data)
 
-                try? data.write(to: logFileURL, options: .atomic)
+                } else {
+
+                    try? data.write(to: targetURL, options: .atomic)
+
+                }
 
             }
 

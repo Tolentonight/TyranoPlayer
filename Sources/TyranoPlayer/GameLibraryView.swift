@@ -195,10 +195,6 @@ struct GameLibraryView: View {
 
     @EnvironmentObject private var orientationManager: OrientationManager
 
-    @ObservedObject private var logger = AppLogger.shared
-
-
-
     @State private var activePickerMode: PickerImportMode?
 
     @State private var activeGame: Game?
