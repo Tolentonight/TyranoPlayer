@@ -1341,7 +1341,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                 try {
 
-                    // (A) 永久锁定 $.isNWJS() 与 $.isElectron() 为 false，彻底阻断 tyrano/libs.js 走 Windows EXE 分支
+                    // (A) 永久锁定 $.isNWJS() 与 $.isElectron() 为 false（阻断 Windows 本地 .sav 分支），并锁定 $.getBrowser() 为 'chrome'（防止 PC 版游戏在 iOS Safari 下跳过或黑屏 WebM 开场动画）
 
                     Object.defineProperty(jq, 'isNWJS', {
 
@@ -1362,6 +1362,18 @@ struct WebPlayerView: UIViewRepresentable {
                         enumerable: true,
 
                         get: function() { return function() { return false; }; },
+
+                        set: function() {}
+
+                    });
+
+                    Object.defineProperty(jq, 'getBrowser', {
+
+                        configurable: true,
+
+                        enumerable: true,
+
+                        get: function() { return function() { return 'chrome'; }; },
 
                         set: function() {}
 
@@ -1429,7 +1441,279 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // (C) 单次非递归拦截 $.loadText（带 __tyranoLoadTextWrapper 标记，严防重复包装引起 Maximum call stack size exceeded）
+                    // (C) 智能异步图片预解码与 LRU 显存池（上限 48 张，彻底解决 Teaching Feeling 摸头结束/跨天/触发 CG 时的图片加载延迟与掉帧，同时防止 iOS WebContent 显存溢出重启）
+
+                    var _gpuImageCachePool = [];
+
+                    var _gpuImageCacheMap = {};
+
+                    var _GPU_CACHE_MAX_SIZE = 48;
+
+                    var _preloadQueue = [];
+
+                    var _activePreloads = 0;
+
+
+
+                    function pumpImagePreloadQueue() {
+
+                        while (_activePreloads < 3 && _preloadQueue.length > 0) {
+
+                            var nextUrl = _preloadQueue.shift();
+
+                            if (!nextUrl || _gpuImageCacheMap[nextUrl]) continue;
+
+                            _activePreloads++;
+
+                            (function(imgUrl) {
+
+                                var img = new Image();
+
+                                img.decoding = 'async';
+
+                                var finish = function() {
+
+                                    _activePreloads = Math.max(0, _activePreloads - 1);
+
+                                    setTimeout(pumpImagePreloadQueue, 8);
+
+                                };
+
+                                img.onload = function() {
+
+                                    _gpuImageCacheMap[imgUrl] = img;
+
+                                    _gpuImageCachePool.push({ url: imgUrl, img: img });
+
+                                    while (_gpuImageCachePool.length > _GPU_CACHE_MAX_SIZE) {
+
+                                        var evicted = _gpuImageCachePool.shift();
+
+                                        if (evicted && evicted.url) {
+
+                                            delete _gpuImageCacheMap[evicted.url];
+
+                                            if (evicted.img) evicted.img.src = '';
+
+                                        }
+
+                                    }
+
+                                    if (typeof img.decode === 'function') {
+
+                                        img.decode().catch(function(){}).finally(finish);
+
+                                    } else {
+
+                                        finish();
+
+                                    }
+
+                                };
+
+                                img.onerror = finish;
+
+                                img.src = imgUrl;
+
+                            })(nextUrl);
+
+                        }
+
+                    }
+
+
+
+                    function enqueueImageWarmup(url) {
+
+                        if (!url || typeof url !== 'string') return;
+
+                        var clean = collapseSlashes(url.trim());
+
+                        if (!clean || clean.indexOf('data:') === 0 || _gpuImageCacheMap[clean]) return;
+
+                        if (_preloadQueue.indexOf(clean) === -1 && _preloadQueue.length < 96) {
+
+                            _preloadQueue.push(clean);
+
+                            pumpImagePreloadQueue();
+
+                        }
+
+                    }
+
+
+
+                    window.__tyranoTrimMemoryPool = function(keepCount) {
+
+                        var limit = typeof keepCount === 'number' ? keepCount : 12;
+
+                        while (_gpuImageCachePool.length > limit) {
+
+                            var evicted = _gpuImageCachePool.shift();
+
+                            if (evicted && evicted.url) {
+
+                                delete _gpuImageCacheMap[evicted.url];
+
+                                if (evicted.img) evicted.img.src = '';
+
+                            }
+
+                        }
+
+                        _preloadQueue.length = 0;
+
+                    };
+
+
+
+                    function resolveScenarioAssetPath(tagName, storageVal, folderVal) {
+
+                        var s = String(storageVal || '').trim();
+
+                        if (!s || s.indexOf('&') === 0 || s.indexOf('%') === 0) return null;
+
+                        if (s.indexOf('./') === 0) s = s.slice(2);
+
+                        if (s.indexOf('data/') === 0) return s;
+
+                        var folder = String(folderVal || '').trim();
+
+                        if (!folder) {
+
+                            if (tagName === 'bg' || tagName === 'bg2') folder = 'bgimage';
+
+                            else if (tagName === 'chara_new' || tagName === 'chara_face' || tagName === 'chara_mod' || tagName === 'chara_show' || tagName === 'chara_layer') folder = 'fgimage';
+
+                            else if (tagName === 'button' || tagName === 'glink') folder = 'image';
+
+                            else folder = 'fgimage';
+
+                        }
+
+                        return 'data/' + folder + '/' + s;
+
+                    }
+
+
+
+                    function extractAttrFromTagLine(lineStr, attrName) {
+
+                        var lowerLine = lineStr.toLowerCase();
+
+                        var idx = lowerLine.indexOf(attrName);
+
+                        if (idx === -1) return '';
+
+                        var eqIdx = lineStr.indexOf('=', idx + attrName.length);
+
+                        if (eqIdx === -1) return '';
+
+                        var rest = lineStr.slice(eqIdx + 1).trim();
+
+                        if (!rest) return '';
+
+                        var quote = rest.charAt(0);
+
+                        if (quote === '"' || quote === "'") {
+
+                            var endQuote = rest.indexOf(quote, 1);
+
+                            return endQuote !== -1 ? rest.slice(1, endQuote).trim() : '';
+
+                        }
+
+                        var out = '';
+
+                        for (var c = 0; c < rest.length; c++) {
+
+                            var ch = rest.charAt(c);
+
+                            if (ch === ' ' || ch === ']' || ch === String.fromCharCode(9)) break;
+
+                            out += ch;
+
+                        }
+
+                        return out.trim();
+
+                    }
+
+
+
+                    function prewarmScenarioImages(ksText) {
+
+                        if (!ksText || typeof ksText !== 'string') return;
+
+                        var lines = ksText.split(NL);
+
+                        var queuedCount = 0;
+
+                        for (var i = 0; i < lines.length && queuedCount < 36; i++) {
+
+                            var line = lines[i].trim();
+
+                            if (!line) continue;
+
+                            var firstCh = line.charAt(0);
+
+                            if (firstCh !== '[' && firstCh !== '@') continue;
+
+                            if (line.indexOf('storage') === -1 && line.indexOf('graphic') === -1) continue;
+
+                            var body = line.slice(1).trim();
+
+                            var tName = '';
+
+                            for (var k = 0; k < body.length; k++) {
+
+                                var ch = body.charAt(k);
+
+                                if (ch === ' ' || ch === ']' || ch === '=' || ch === String.fromCharCode(9)) break;
+
+                                tName += ch;
+
+                            }
+
+                            tName = tName.toLowerCase();
+
+                            if (tName !== 'bg' && tName !== 'bg2' && tName !== 'image' && tName !== 'chara_new' && tName !== 'chara_face' && tName !== 'chara_mod' && tName !== 'chara_show' && tName !== 'chara_layer' && tName !== 'preload' && tName !== 'button') {
+
+                                continue;
+
+                            }
+
+                            var rawPath = extractAttrFromTagLine(line, 'storage') || extractAttrFromTagLine(line, 'graphic');
+
+                            if (!rawPath) continue;
+
+                            var lowerExt = rawPath.toLowerCase();
+
+                            if (!lowerExt.endsWith('.png') && !lowerExt.endsWith('.jpg') && !lowerExt.endsWith('.jpeg') && !lowerExt.endsWith('.webp') && !lowerExt.endsWith('.gif')) {
+
+                                continue;
+
+                            }
+
+                            var folderVal = extractAttrFromTagLine(line, 'folder');
+
+                            var resolved = resolveScenarioAssetPath(tName, rawPath, folderVal);
+
+                            if (resolved) {
+
+                                enqueueImageWarmup(resolved);
+
+                                queuedCount++;
+
+                            }
+
+                        }
+
+                    }
+
+
+
+                    // (D) 单次非递归拦截 $.loadText（带 __tyranoLoadTextWrapper 标记，严防重复包装引起 Maximum call stack size exceeded）
 
                     var _origLoadText = undefined;
 
@@ -1439,7 +1723,11 @@ struct WebPlayerView: UIViewRepresentable {
 
                         var pathStr = String(file_path || '');
 
-                        var isConfig = pathStr.toLowerCase().indexOf('config.tjs') !== -1;
+                        var lowerPath = pathStr.toLowerCase();
+
+                        var isConfig = lowerPath.indexOf('config.tjs') !== -1;
+
+                        var isScenario = lowerPath.endsWith('.ks');
 
                         return _origLoadText.call(jq, file_path, function(order_str) {
 
@@ -1454,6 +1742,12 @@ struct WebPlayerView: UIViewRepresentable {
                                 if (window.TYRANO && window.TYRANO.kag) {
 
                                     installVariableNullGuard(window.TYRANO.kag);
+
+                                }
+
+                                if (isScenario && typeof order_str === 'string') {
+
+                                    setTimeout(function() { prewarmScenarioImages(order_str); }, 0);
 
                                 }
 
@@ -2379,7 +2673,195 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 7. 音视频元素拦截与 .ogg -> .m4a -> .mp3 自动降级，全部失败时优雅跳过不卡死
+            // 7. 音视频与图片元素硬件加速拦截：修复开场动画有声音无画面（提升 video 图层层级 + 自动解锁播放 + WebM/OGV/MP4 多格式回退）并开启 IMG 异步 GPU 解码
+
+            function enforceVideoVisibleAndPlayable(videoEl) {
+
+                if (!videoEl || videoEl.__tyranoVideoEnhanced) return;
+
+                videoEl.__tyranoVideoEnhanced = true;
+
+                try {
+
+                    videoEl.setAttribute('playsinline', '');
+
+                    videoEl.setAttribute('webkit-playsinline', '');
+
+                    videoEl.playsInline = true;
+
+                    videoEl.preload = 'auto';
+
+
+
+                    // 修复 TyranoScript [bgmovie] / [movie] 在 iOS WebKit 下因 z-index 过低或未合入 GPU 合成层导致「只有声音没有画面」的问题
+
+                    var fixVideoStyle = function() {
+
+                        try {
+
+                            videoEl.style.visibility = 'visible';
+
+                            if (videoEl.style.display === 'none') {
+
+                                videoEl.style.display = 'block';
+
+                            }
+
+                            if (!videoEl.style.opacity || parseFloat(videoEl.style.opacity) === 0) {
+
+                                videoEl.style.opacity = '1';
+
+                            }
+
+                            videoEl.style.webkitTransform = 'translateZ(0)';
+
+                            videoEl.style.transform = 'translateZ(0)';
+
+                            videoEl.style.objectFit = 'contain';
+
+                            if (!videoEl.style.width || videoEl.style.width === '0px') {
+
+                                videoEl.style.width = '100%';
+
+                            }
+
+                            if (!videoEl.style.height || videoEl.style.height === '0px') {
+
+                                videoEl.style.height = '100%';
+
+                            }
+
+                            var currentZ = parseInt(videoEl.style.zIndex || '0', 10);
+
+                            if (videoEl.id === 'bgmovie' || currentZ < 10) {
+
+                                videoEl.style.position = 'absolute';
+
+                                videoEl.style.left = '0px';
+
+                                videoEl.style.top = '0px';
+
+                                // 使 #root_layer_game 与 .layer_base_fore 背景透明，防止黑色底图遮挡底层视频
+
+                                var baseLayer = document.querySelector('.0_fore') || document.querySelector('.base_fore');
+
+                                if (baseLayer) baseLayer.style.backgroundColor = 'transparent';
+
+                                var tyranoBase = document.getElementById('tyrano_base');
+
+                                if (tyranoBase) tyranoBase.style.backgroundColor = 'transparent';
+
+                            }
+
+                        } catch (eStyle) {}
+
+                    };
+
+
+
+                    videoEl.addEventListener('loadedmetadata', fixVideoStyle);
+
+                    videoEl.addEventListener('loadeddata', fixVideoStyle);
+
+                    videoEl.addEventListener('play', fixVideoStyle);
+
+                    videoEl.addEventListener('playing', fixVideoStyle);
+
+                    setTimeout(fixVideoStyle, 0);
+
+                    setTimeout(fixVideoStyle, 60);
+
+
+
+                    // 拦截 play()：若因 iOS 自动播放策略被拒，自动静音重试并在首次触摸时恢复音量
+
+                    var origPlay = videoEl.play;
+
+                    if (typeof origPlay === 'function') {
+
+                        videoEl.play = function() {
+
+                            fixVideoStyle();
+
+                            var p = origPlay.apply(videoEl, arguments);
+
+                            if (p && typeof p.catch === 'function') {
+
+                                return p.catch(function(err) {
+
+                                    sendLog('WARN', ['[视频兼容层] 自动播放受阻，正在启用静音内联播放回退:', String(err)]);
+
+                                    videoEl.muted = true;
+
+                                    var unlockAudio = function() {
+
+                                        videoEl.muted = false;
+
+                                        document.removeEventListener('touchstart', unlockAudio, true);
+
+                                        document.removeEventListener('click', unlockAudio, true);
+
+                                    };
+
+                                    document.addEventListener('touchstart', unlockAudio, true);
+
+                                    document.addEventListener('click', unlockAudio, true);
+
+                                    return origPlay.apply(videoEl, arguments).catch(function() {
+
+                                        try { videoEl.dispatchEvent(new Event('ended')); } catch (e2) {}
+
+                                    });
+
+                                });
+
+                            }
+
+                            return p;
+
+                        };
+
+                    }
+
+
+
+                    videoEl.addEventListener('error', function() {
+
+                        var src = videoEl.getAttribute('src') || videoEl.src || '';
+
+                        var cleanSrc = src.split('?')[0].toLowerCase();
+
+                        if ((cleanSrc.endsWith('.webm') || cleanSrc.endsWith('.ogv')) && !videoEl.dataset.videoFallbackTried) {
+
+                            videoEl.dataset.videoFallbackTried = 'mp4';
+
+                            var dotIdx = src.lastIndexOf('.');
+
+                            if (dotIdx !== -1) {
+
+                                videoEl.src = src.slice(0, dotIdx) + '.mp4';
+
+                                videoEl.load();
+
+                                videoEl.play().catch(function(){});
+
+                                return;
+
+                            }
+
+                        }
+
+                        sendLog('WARN', ['[优雅降级] 视频格式不受支持或缺失，已自动跳过:', src || 'video']);
+
+                        try { videoEl.dispatchEvent(new Event('ended')); } catch (e) {}
+
+                    }, true);
+
+                } catch (e) {}
+
+            }
+
+
 
             var origCreateElement = document.createElement.bind(document);
 
@@ -2393,21 +2875,11 @@ struct WebPlayerView: UIViewRepresentable {
 
                     if (lower === 'video') {
 
-                        el.setAttribute('playsinline', '');
+                        enforceVideoVisibleAndPlayable(el);
 
-                        el.setAttribute('webkit-playsinline', '');
+                    } else if (lower === 'img') {
 
-                        el.playsInline = true;
-
-                        el.preload = 'auto';
-
-                        el.addEventListener('error', function() {
-
-                            sendLog('WARN', ['[优雅降级] 视频格式不受支持或缺失，已自动跳过:', el.src || 'video']);
-
-                            try { el.dispatchEvent(new Event('ended')); } catch (e) {}
-
-                        }, true);
+                        el.decoding = 'async';
 
                     } else if (lower === 'audio') {
 
@@ -2583,6 +3055,132 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            function hookTyranoPreloadAndMovieTags() {
+
+                try {
+
+                    if (!window.TYRANO || !window.TYRANO.kag) return;
+
+                    var kag = window.TYRANO.kag;
+
+
+
+                    // 挂钩 kag.preload：用带 img.decode() GPU 纹理预热的加载器替代原生简单 Image()，消除切换场景首帧白闪与掉帧
+
+                    if (typeof kag.preload === 'function' && !kag.preload.__tyranoGpuEnhanced) {
+
+                        var origPreload = kag.preload;
+
+                        var gpuPreload = function(src, callbk) {
+
+                            var s = String(src || '');
+
+                            var lower = s.split('?')[0].toLowerCase();
+
+                            if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp') || lower.endsWith('.gif')) {
+
+                                var img = new Image();
+
+                                img.decoding = 'async';
+
+                                var done = false;
+
+                                var finishOnce = function() {
+
+                                    if (done) return;
+
+                                    done = true;
+
+                                    if (typeof callbk === 'function') callbk(img);
+
+                                };
+
+                                img.onload = function() {
+
+                                    if (typeof img.decode === 'function') {
+
+                                        img.decode().catch(function(){}).finally(finishOnce);
+
+                                    } else {
+
+                                        finishOnce();
+
+                                    }
+
+                                };
+
+                                img.onerror = finishOnce;
+
+                                img.src = s;
+
+                                return;
+
+                            }
+
+                            return origPreload.apply(this, arguments);
+
+                        };
+
+                        gpuPreload.__tyranoGpuEnhanced = true;
+
+                        kag.preload = gpuPreload;
+
+                    }
+
+
+
+                    // 观察 DOM 中动态插入的 <video> 节点，确保任何通过 jQuery($('<video>')) 插入的开场动画都能正常显示画面
+
+                    if (!window.__tyranoVideoObserverInstalled && window.MutationObserver && document.body) {
+
+                        window.__tyranoVideoObserverInstalled = true;
+
+                        var obs = new MutationObserver(function(mutations) {
+
+                            for (var m = 0; m < mutations.length; m++) {
+
+                                var added = mutations[m].addedNodes;
+
+                                if (!added) continue;
+
+                                for (var n = 0; n < added.length; n++) {
+
+                                    var node = added[n];
+
+                                    if (!node || node.nodeType !== 1) continue;
+
+                                    if (String(node.tagName).toUpperCase() === 'VIDEO') {
+
+                                        enforceVideoVisibleAndPlayable(node);
+
+                                    } else if (node.querySelectorAll) {
+
+                                        var vids = node.querySelectorAll('video');
+
+                                        for (var v = 0; v < vids.length; v++) {
+
+                                            enforceVideoVisibleAndPlayable(vids[v]);
+
+                                        }
+
+                                    }
+
+                                }
+
+                            }
+
+                        });
+
+                        obs.observe(document.body, { childList: true, subtree: true });
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
             function hookTyranoStorageAndSF() {
 
                 ensureKagVariableInitialized();
@@ -2592,6 +3190,8 @@ struct WebPlayerView: UIViewRepresentable {
                     shieldTyranoJQueryInstance(_lockedJQuery);
 
                 }
+
+                hookTyranoPreloadAndMovieTags();
 
             }
 
@@ -2669,7 +3269,31 @@ struct WebPlayerView: UIViewRepresentable {
 
                 }
 
-                video { object-fit: contain; }
+                #tyrano_base, .tyrano_base, #root_layer_game, #root_layer_system, .layer, .tyrano_chara, .chara_img {
+
+                    -webkit-backface-visibility: hidden;
+
+                    backface-visibility: hidden;
+
+                    -webkit-transform: translateZ(0);
+
+                    transform: translateZ(0);
+
+                    will-change: transform, opacity;
+
+                }
+
+                video, #bgmovie {
+
+                    object-fit: contain !important;
+
+                    visibility: visible !important;
+
+                    -webkit-transform: translateZ(0) !important;
+
+                    transform: translateZ(0) !important;
+
+                }
 
             `;
 
@@ -3055,6 +3679,12 @@ struct WebPlayerView: UIViewRepresentable {
 
         var lastStretchState: Bool = false
 
+        private var saveWriteWorkItem: DispatchWorkItem?
+
+        private var lastProcessTerminateAt: Date = .distantPast
+
+        private let saveIOQueue = DispatchQueue(label: "com.tyrano.save.io", qos: .utility)
+
         let onConsoleLog: (ConsoleLogEntry) -> Void
 
 
@@ -3068,6 +3698,38 @@ struct WebPlayerView: UIViewRepresentable {
             super.init()
 
             reloadSaveDictFromDisk()
+
+            NotificationCenter.default.addObserver(
+
+                self,
+
+                selector: #selector(handleSystemMemoryWarning),
+
+                name: UIApplication.didReceiveMemoryWarningNotification,
+
+                object: nil
+
+            )
+
+        }
+
+
+
+        deinit {
+
+            NotificationCenter.default.removeObserver(self)
+
+        }
+
+
+
+        @objc private func handleSystemMemoryWarning() {
+
+            log(level: .warn, message: "[内存保护] 收到系统低内存告警，正在主动清理预解码纹理池以防游戏重启…")
+
+            LocalGameHTTPServer.shared.clearMemoryCaches()
+
+            webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(8); }", completionHandler: nil)
 
         }
 
@@ -3099,19 +3761,43 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-        private func persistSaveDict() {
+        private func persistSaveDict(immediate: Bool = false) {
 
-            let dir = nativeSaveStoreURL.deletingLastPathComponent()
+            saveWriteWorkItem?.cancel()
 
-            if !FileManager.default.fileExists(atPath: dir.path) {
+            let snapshot = self.saveDict
 
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let targetURL = self.nativeSaveStoreURL
+
+            let writeBlock: @Sendable () -> Void = {
+
+                let dir = targetURL.deletingLastPathComponent()
+
+                if !FileManager.default.fileExists(atPath: dir.path) {
+
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+                }
+
+                if let data = try? JSONSerialization.data(withJSONObject: snapshot, options: []) {
+
+                    try? data.write(to: targetURL, options: .atomic)
+
+                }
 
             }
 
-            if let data = try? JSONSerialization.data(withJSONObject: saveDict, options: [.prettyPrinted]) {
+            if immediate {
 
-                try? data.write(to: nativeSaveStoreURL, options: .atomic)
+                saveIOQueue.async(execute: writeBlock)
+
+            } else {
+
+                let item = DispatchWorkItem(block: writeBlock)
+
+                saveWriteWorkItem = item
+
+                saveIOQueue.asyncAfter(deadline: .now() + 0.25, execute: item)
 
             }
 
@@ -3217,7 +3903,37 @@ struct WebPlayerView: UIViewRepresentable {
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
 
-            log(level: .warn, message: "[WebKit] 渲染进程被系统回收，正在自动恢复…")
+            persistSaveDict(immediate: true)
+
+            LocalGameHTTPServer.shared.clearMemoryCaches()
+
+            let now = Date()
+
+            guard now.timeIntervalSince(lastProcessTerminateAt) > 3.0 else {
+
+                log(level: .error, message: "[WebKit] 渲染进程短时间内重复终止，已暂停自动重载以防死循环")
+
+                return
+
+            }
+
+            lastProcessTerminateAt = now
+
+            log(level: .warn, message: "[WebKit] 渲染进程因系统内存压力回收，已保存最新进度并自动恢复…")
+
+            let latestJSON = WebPlayerView.loadInitialSaveJSON(from: nativeSaveStoreURL)
+
+            let syncBackupScript = WKUserScript(
+
+                source: "window.__TYRANO_NATIVE_SAVES__ = \(latestJSON);",
+
+                injectionTime: .atDocumentStart,
+
+                forMainFrameOnly: false
+
+            )
+
+            webView.configuration.userContentController.addUserScript(syncBackupScript)
 
             webView.reload()
 
@@ -3347,6 +4063,14 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
+    // O(1) 路径解析缓存与热门小文件内存缓存（消除摸头结束/跨天/CG切换时的重复磁盘目录遍历开销）
+
+    private var resolvedPathCache: [String: URL] = [:]
+
+    private var sanitizedTextCache: [String: Data] = [:]
+
+
+
     private let acceptQueue = DispatchQueue(label: "com.tyrano.httpserver.accept", qos: .userInteractive)
 
     private let clientQueue = DispatchQueue(label: "com.tyrano.httpserver.client", qos: .userInteractive, attributes: .concurrent)
@@ -3357,11 +4081,35 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-    func startAndMakeEntryURL(rootDirectoryURL: URL, entryHTMLURL: URL) -> URL? {
+    func clearMemoryCaches() {
 
         lock.lock()
 
-        self.rootDirectoryURL = rootDirectoryURL.standardizedFileURL
+        resolvedPathCache.removeAll()
+
+        sanitizedTextCache.removeAll()
+
+        lock.unlock()
+
+    }
+
+
+
+    func startAndMakeEntryURL(rootDirectoryURL: URL, entryHTMLURL: URL) -> URL? {
+
+        let stdRoot = rootDirectoryURL.standardizedFileURL
+
+        lock.lock()
+
+        if self.rootDirectoryURL != stdRoot {
+
+            self.rootDirectoryURL = stdRoot
+
+            self.resolvedPathCache.removeAll()
+
+            self.sanitizedTextCache.removeAll()
+
+        }
 
         let activePort = ensureListeningLocked()
 
@@ -3371,7 +4119,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         guard activePort > 0 else { return nil }
 
-        let baseComps = rootDirectoryURL.standardizedFileURL.pathComponents
+        let baseComps = stdRoot.pathComponents
 
         let entryComps = entryHTMLURL.standardizedFileURL.pathComponents
 
@@ -3555,6 +4303,14 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
             _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
+            var noDelay: Int32 = 1
+
+            _ = Darwin.setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+
+            var sendBufSize: Int32 = 524_288
+
+            _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, &sendBufSize, socklen_t(MemoryLayout<Int32>.size))
+
             var tv = timeval(tv_sec: 5, tv_usec: 0)
 
             _ = Darwin.setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -3611,7 +4367,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        let lines = headerText.components(separatedBy: "\r\n")
+        let lines = headerText.components(separatedBy: "
+
+")
 
         guard let requestLine = lines.first else { return }
 
@@ -3625,7 +4383,19 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         if method == "OPTIONS" {
 
-            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            let resp = "HTTP/1.1 200 OK
+
+Access-Control-Allow-Origin: *
+
+Access-Control-Allow-Methods: GET, HEAD, OPTIONS
+
+Content-Length: 0
+
+Connection: close
+
+
+
+"
 
             sendAll(socket: clientSock, data: Data(resp.utf8))
 
@@ -3669,7 +4439,17 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
               let payloadData = loadAndSanitizeFileData(at: resolvedFileURL) else {
 
-            let notFound = "HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            let notFound = "HTTP/1.1 404 Not Found
+
+Access-Control-Allow-Origin: *
+
+Content-Length: 0
+
+Connection: close
+
+
+
+"
 
             sendAll(socket: clientSock, data: Data(notFound.utf8))
 
@@ -3679,29 +4459,67 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        let mime = mimeType(for: resolvedFileURL.pathExtension.lowercased())
+        let ext = resolvedFileURL.pathExtension.lowercased()
+
+        let mime = mimeType(for: ext)
 
         let totalLen = payloadData.count
 
+        let cachePolicy = cacheControlHeader(for: ext)
+
+        let etag = ""\(totalLen)-\(resolvedFileURL.lastPathComponent.hashValue)""
 
 
-        // 检查 Range 请求头（iOS WebKit <audio>/<video> 媒体播放必须支持 HTTP 206 Partial Content）
+
+        // 支持 ETag 304 Not Modified 快速命中，彻底消除同一立绘/背景重复传输与重复解码
+
+        var ifNoneMatch: String?
 
         var rangeHeader: String?
 
         for line in lines.dropFirst() {
 
-            if line.lowercased().hasPrefix("range:") {
+            let lowerLine = line.lowercased()
+
+            if lowerLine.hasPrefix("range:") {
 
                 rangeHeader = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
 
-                break
+            } else if lowerLine.hasPrefix("if-none-match:") {
+
+                ifNoneMatch = line.dropFirst(14).trimmingCharacters(in: .whitespaces)
 
             }
 
         }
 
 
+
+        if rangeHeader == nil, let clientETag = ifNoneMatch, clientETag == etag, isStaticCacheableAsset(ext: ext) {
+
+            let notModified = "HTTP/1.1 304 Not Modified
+
+ETag: \(etag)
+
+Cache-Control: \(cachePolicy)
+
+Access-Control-Allow-Origin: *
+
+Connection: close
+
+
+
+"
+
+            sendAll(socket: clientSock, data: Data(notModified.utf8))
+
+            return
+
+        }
+
+
+
+        // 检查 Range 请求头（iOS WebKit <audio>/<video> 媒体播放必须支持 HTTP 206 Partial Content）
 
         if let rangeStr = rangeHeader, rangeStr.lowercased().hasPrefix("bytes="), totalLen > 0 {
 
@@ -3723,7 +4541,27 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-                let header = "HTTP/1.1 206 Partial Content\r\nContent-Type: \(mime)\r\nAccept-Ranges: bytes\r\nContent-Range: bytes \(clampedStart)-\(clampedEnd)/\(totalLen)\r\nContent-Length: \(sliceLen)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+                let header = "HTTP/1.1 206 Partial Content
+
+Content-Type: \(mime)
+
+Accept-Ranges: bytes
+
+Content-Range: bytes \(clampedStart)-\(clampedEnd)/\(totalLen)
+
+Content-Length: \(sliceLen)
+
+ETag: \(etag)
+
+Access-Control-Allow-Origin: *
+
+Cache-Control: \(cachePolicy)
+
+Connection: close
+
+
+
+"
 
                 sendAll(socket: clientSock, data: Data(header.utf8))
 
@@ -3743,7 +4581,25 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        let okHeader = "HTTP/1.1 200 OK\r\nContent-Type: \(mime)\r\nAccept-Ranges: bytes\r\nContent-Length: \(totalLen)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        let okHeader = "HTTP/1.1 200 OK
+
+Content-Type: \(mime)
+
+Accept-Ranges: bytes
+
+Content-Length: \(totalLen)
+
+ETag: \(etag)
+
+Access-Control-Allow-Origin: *
+
+Cache-Control: \(cachePolicy)
+
+Connection: close
+
+
+
+"
 
         sendAll(socket: clientSock, data: Data(okHeader.utf8))
 
@@ -3757,9 +4613,59 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
+    private func isStaticCacheableAsset(ext: String) -> Bool {
+
+        switch ext {
+
+        case "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "woff", "woff2", "ttf", "otf", "ogg", "oga", "m4a", "mp4a", "mp3", "wav":
+
+            return true
+
+        default:
+
+            return false
+
+        }
+
+    }
+
+
+
+    private func cacheControlHeader(for ext: String) -> String {
+
+        // 对高分辨率立绘、CG、背景图、字体启用 WebKit 强缓存，消除场景转换与摸头循环时的重复解码卡顿
+
+        if isStaticCacheableAsset(ext: ext) {
+
+            return "public, max-age=86400, immutable"
+
+        }
+
+        return "no-cache"
+
+    }
+
+
+
     private func resolveLocalFile(in rootDir: URL, relativePath: String) -> URL? {
 
         if relativePath.isEmpty || relativePath.contains("..") { return nil }
+
+
+
+        lock.lock()
+
+        if let cached = resolvedPathCache[relativePath] {
+
+            lock.unlock()
+
+            return cached
+
+        }
+
+        lock.unlock()
+
+
 
         let fm = FileManager.default
 
@@ -3773,13 +4679,15 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         if fm.fileExists(atPath: directURL.path, isDirectory: &isDir), !isDir.boolValue {
 
+            cacheResolvedPath(relativePath, url: directURL)
+
             return directURL
 
         }
 
 
 
-        // 2. 自动忽略大小写逐级匹配（解决 Windows 游戏素材大小写不一致问题）
+        // 2. 自动忽略大小写逐级匹配（解决 Windows 游戏素材大小写不一致问题，并支持音视频同名格式自动回退）
 
         let components = relativePath.split(separator: "/").map(String.init)
 
@@ -3796,6 +4704,8 @@ final class LocalGameHTTPServer: @unchecked Sendable {
                 currentURL = candidate
 
                 if idx == components.count - 1 && !subDir.boolValue {
+
+                    cacheResolvedPath(relativePath, url: currentURL)
 
                     return currentURL
 
@@ -3821,25 +4731,45 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                 if idx == components.count - 1 && fm.fileExists(atPath: matched.path, isDirectory: &matchedDir) && !matchedDir.boolValue {
 
+                    cacheResolvedPath(relativePath, url: matched)
+
                     return matched
 
                 }
 
-            } else if idx == components.count - 1 && lowerComp.hasSuffix(".ogg") {
+            } else if idx == components.count - 1 {
 
-                // 3. 若请求 .ogg 音频不存在，自动查找同目录下同名 .m4a 或 .mp3
+                // 3. 若请求 .ogg 音频或 .webm/.ogv/.mp4 视频不存在，自动查找同目录下同名兼容媒体文件
 
-                let baseName = String(lowerComp.dropLast(4))
+                let mediaExts = [".ogg", ".m4a", ".mp3", ".wav", ".webm", ".ogv", ".mp4", ".m4v"]
 
-                if let fallbackAudio = children.first(where: {
+                if let matchedExt = mediaExts.first(where: { lowerComp.hasSuffix($0) }) {
 
-                    let n = $0.lastPathComponent.lowercased()
+                    let baseName = String(lowerComp.dropLast(matchedExt.count))
 
-                    return n == baseName + ".m4a" || n == baseName + ".mp3"
+                    let fallbackCandidates: [String]
 
-                }) {
+                    if matchedExt == ".webm" || matchedExt == ".ogv" || matchedExt == ".mp4" || matchedExt == ".m4v" {
 
-                    return fallbackAudio
+                        fallbackCandidates = [baseName + ".mp4", baseName + ".m4v", baseName + ".webm", baseName + ".ogv"]
+
+                    } else {
+
+                        fallbackCandidates = [baseName + ".m4a", baseName + ".mp3", baseName + ".ogg", baseName + ".wav"]
+
+                    }
+
+                    for candName in fallbackCandidates {
+
+                        if let fallbackFile = children.first(where: { $0.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == candName }) {
+
+                            cacheResolvedPath(relativePath, url: fallbackFile)
+
+                            return fallbackFile
+
+                        }
+
+                    }
 
                 }
 
@@ -3859,9 +4789,25 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-    private func loadAndSanitizeFileData(at fileURL: URL) -> Data? {
+    private func cacheResolvedPath(_ relPath: String, url: URL) {
 
-        guard let rawData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
+        lock.lock()
+
+        if resolvedPathCache.count > 4096 {
+
+            resolvedPathCache.removeAll(keepingCapacity: true)
+
+        }
+
+        resolvedPathCache[relPath] = url
+
+        lock.unlock()
+
+    }
+
+
+
+    private func loadAndSanitizeFileData(at fileURL: URL) -> Data? {
 
         let ext = fileURL.pathExtension.lowercased()
 
@@ -3869,9 +4815,27 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        // 对 Tyrano 配置文件与剧本文件在内存中自动执行 Shift-JIS -> UTF-8 转码与 Config.tjs 净化，原文件保持只读
+        // 对 Tyrano 配置文件与剧本文件在内存中自动执行 Shift-JIS -> UTF-8 转码与缓存，原文件保持只读
 
         if ext == "tjs" || ext == "ks" {
+
+            let cacheKey = fileURL.path
+
+            lock.lock()
+
+            if let cachedData = sanitizedTextCache[cacheKey] {
+
+                lock.unlock()
+
+                return cachedData
+
+            }
+
+            lock.unlock()
+
+
+
+            guard let rawData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
 
             var text: String?
 
@@ -3911,15 +4875,29 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                 if let utf8Data = validText.data(using: .utf8) {
 
+                    lock.lock()
+
+                    if sanitizedTextCache.count > 256 {
+
+                        sanitizedTextCache.removeAll(keepingCapacity: true)
+
+                    }
+
+                    sanitizedTextCache[cacheKey] = utf8Data
+
+                    lock.unlock()
+
                     return utf8Data
 
                 }
 
             }
 
+            return rawData
+
         }
 
-        return rawData
+        return try? Data(contentsOf: fileURL, options: .mappedIfSafe)
 
     }
 
