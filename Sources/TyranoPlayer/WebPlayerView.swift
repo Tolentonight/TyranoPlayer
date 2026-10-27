@@ -977,6 +977,36 @@ struct WebPlayerView: UIViewRepresentable {
 
             window.__TYRANO_MEM_CACHE__ = {};
 
+            var _memCacheKeysQueue = [];
+
+            var _MEM_CACHE_MAX_ITEMS = 10;
+
+            function putBoundedMemCache(key, val) {
+
+                if (!key) return;
+
+                if (!Object.prototype.hasOwnProperty.call(window.__TYRANO_MEM_CACHE__, key)) {
+
+                    _memCacheKeysQueue.push(key);
+
+                    while (_memCacheKeysQueue.length > _MEM_CACHE_MAX_ITEMS) {
+
+                        var oldestKey = _memCacheKeysQueue.shift();
+
+                        if (oldestKey) {
+
+                            delete window.__TYRANO_MEM_CACHE__[oldestKey];
+
+                        }
+
+                    }
+
+                }
+
+                window.__TYRANO_MEM_CACHE__[key] = val;
+
+            }
+
 
 
             function normalizeSaveKey(rawKey) {
@@ -1295,7 +1325,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                         }
 
-                        window.__TYRANO_MEM_CACHE__[clean] = txt;
+                        putBoundedMemCache(clean, txt);
 
                         return txt;
 
@@ -1443,37 +1473,117 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 5.5 零额外请求的图片 GPU 纹理常驻池（仅保留游戏自然加载过的最近 36 张图片引用，彻底解决结束摸头/跨天切回房间时重新解码立绘导致的掉帧，且对启动速度 0 负担）
+            // 5.5 动态滑动窗口资源回收引擎（“加载新资源 -> 自动销毁已用完的旧资源”，严控内存水位永不爆表）
 
-            var _decodedImagePinPool = [];
+            // 仅保留当前画面正在使用的最多 8 张活动图片引用；一旦新图片加载进入队列，立即剥离并销毁滑出窗口的旧图片底层解码纹理
 
-            var _decodedImagePinMap = {};
+            var _activeImageSlidingWindow = [];
 
-            var _PIN_POOL_MAX = 36;
+            var _ACTIVE_IMG_WINDOW_MAX = 8;
 
 
 
-            function pinLoadedImageElement(imgEl) {
+            function releaseDetachedImageNode(imgNode) {
 
                 try {
 
-                    if (!imgEl || !imgEl.src) return;
+                    if (!imgNode || imgNode.nodeType !== 1) return;
 
-                    var src = String(imgEl.src);
+                    // 若图片仍挂载在当前可见 DOM 树上，则绝不破坏当前画面
 
-                    if (!src || src.indexOf('data:') === 0 || _decodedImagePinMap[src]) return;
+                    if (imgNode.isConnected) return;
 
-                    _decodedImagePinMap[src] = imgEl;
+                    if (imgNode.__tyranoReleased) return;
 
-                    _decodedImagePinPool.push({ src: src, el: imgEl });
+                    imgNode.__tyranoReleased = true;
 
-                    while (_decodedImagePinPool.length > _PIN_POOL_MAX) {
+                    imgNode.onload = null;
 
-                        var old = _decodedImagePinPool.shift();
+                    imgNode.onerror = null;
 
-                        if (old && old.src) {
+                    // 关键：将离屏/已移除的 <img> 的 src 置为空并移除属性，强制 WebKit 立即释放 C++ BitmapImage / GPU 显存纹理
 
-                            delete _decodedImagePinMap[old.src];
+                    imgNode.src = TRANSPARENT_PLACEHOLDER_PNG;
+
+                    imgNode.removeAttribute('src');
+
+                    imgNode.removeAttribute('srcset');
+
+                } catch (e) {}
+
+            }
+
+
+
+            function scrubSingleDetachedElement(el) {
+
+                try {
+
+                    if (!el || el.nodeType !== 1 || el.isConnected) return;
+
+                    var tag = String(el.tagName || '').toUpperCase();
+
+                    if (tag === 'IMG') {
+
+                        releaseDetachedImageNode(el);
+
+                    } else if (tag === 'CANVAS') {
+
+                        el.width = 1;
+
+                        el.height = 1;
+
+                    } else if (tag === 'VIDEO' || tag === 'AUDIO') {
+
+                        try { el.pause(); } catch (e0) {}
+
+                        el.removeAttribute('src');
+
+                        while (el.firstChild) {
+
+                            el.removeChild(el.firstChild);
+
+                        }
+
+                        try { el.load(); } catch (e1) {}
+
+                    }
+
+                    // 关键修复：Tyrano 的 [bg] 背景切换大量使用 div 的 style.backgroundImage，移除旧背景节点时必须置为 none 才能让 WebKit 立即释放上一昼夜的巨幅背景显存
+
+                    if (el.style && el.style.backgroundImage && el.style.backgroundImage !== 'none') {
+
+                        el.style.backgroundImage = 'none';
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+            function releaseDetachedMediaOrCanvas(node) {
+
+                try {
+
+                    if (!node || node.nodeType !== 1 || node.isConnected) return;
+
+                    scrubSingleDetachedElement(node);
+
+                    if (node.querySelectorAll) {
+
+                        var children = node.querySelectorAll('img, canvas, video, audio, div, span');
+
+                        for (var i = 0; i < children.length; i++) {
+
+                            var ch = children[i];
+
+                            if (ch && !ch.isConnected) {
+
+                                scrubSingleDetachedElement(ch);
+
+                            }
 
                         }
 
@@ -1485,21 +1595,347 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            window.__tyranoTrimMemoryPool = function(keepCount) {
+            // 拦截离屏 Canvas（如 html2canvas 自动存档缩略图画布）的 toDataURL：导出完成后立即将离屏画布缩为 1x1，避免每次跨天自动截图泄漏 4MB 显存
 
-                var limit = typeof keepCount === 'number' ? keepCount : 8;
+            try {
 
-                while (_decodedImagePinPool.length > limit) {
+                var _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
 
-                    var old = _decodedImagePinPool.shift();
+                if (typeof _origToDataURL === 'function') {
 
-                    if (old && old.src) {
+                    HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
 
-                        delete _decodedImagePinMap[old.src];
+                        var selfCanvas = this;
+
+                        var useType = type || 'image/jpeg';
+
+                        var useQuality = (typeof quality === 'number') ? quality : 0.5;
+
+                        var res = _origToDataURL.call(selfCanvas, useType, useQuality);
+
+                        if (!selfCanvas.isConnected) {
+
+                            setTimeout(function() {
+
+                                try {
+
+                                    if (!selfCanvas.isConnected) {
+
+                                        selfCanvas.width = 1;
+
+                                        selfCanvas.height = 1;
+
+                                    }
+
+                                } catch (e) {}
+
+                            }, 50);
+
+                        }
+
+                        return res;
+
+                    };
+
+                }
+
+            } catch (e) {}
+
+
+
+            function pinLoadedImageElement(imgEl) {
+
+                try {
+
+                    if (!imgEl || !imgEl.src) return;
+
+                    var src = String(imgEl.src);
+
+                    if (!src || src.indexOf('data:') === 0) return;
+
+                    // 若已在滑动窗口中，移到队尾（LRU 更新）
+
+                    for (var i = _activeImageSlidingWindow.length - 1; i >= 0; i--) {
+
+                        if (_activeImageSlidingWindow[i].el === imgEl || _activeImageSlidingWindow[i].src === src) {
+
+                            _activeImageSlidingWindow.splice(i, 1);
+
+                        }
 
                     }
 
-                }
+                    _activeImageSlidingWindow.push({ src: src, el: imgEl });
+
+                    // 当新图片进入窗口导致超出上限时，立即淘汰最老的旧图片并释放其显存
+
+                    while (_activeImageSlidingWindow.length > _ACTIVE_IMG_WINDOW_MAX) {
+
+                        var evicted = _activeImageSlidingWindow.shift();
+
+                        if (evicted && evicted.el && !evicted.el.isConnected) {
+
+                            releaseDetachedImageNode(evicted.el);
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+            // 监听 DOM 节点移除：每当昼夜交替、摸头结束、换装或切换背景移除了旧图层节点，100ms 后自动销毁其底层纹理与音频句柄
+
+            function installDOMRemovalRecycler() {
+
+                try {
+
+                    if (!window.MutationObserver || window.__tyranoDomRecyclerInstalled) return;
+
+                    var targetRoot = document.body || document.documentElement;
+
+                    if (!targetRoot) return;
+
+                    window.__tyranoDomRecyclerInstalled = true;
+
+                    var pendingRemovedNodes = [];
+
+                    var flushTimer = null;
+
+
+
+                    var flushRemovedNodes = function() {
+
+                        flushTimer = null;
+
+                        var batch = pendingRemovedNodes;
+
+                        pendingRemovedNodes = [];
+
+                        for (var i = 0; i < batch.length; i++) {
+
+                            releaseDetachedMediaOrCanvas(batch[i]);
+
+                        }
+
+                    };
+
+
+
+                    var observer = new MutationObserver(function(mutations) {
+
+                        for (var m = 0; m < mutations.length; m++) {
+
+                            var removed = mutations[m].removedNodes;
+
+                            if (!removed || removed.length === 0) continue;
+
+                            for (var r = 0; r < removed.length; r++) {
+
+                                var n = removed[r];
+
+                                if (n && n.nodeType === 1) {
+
+                                    pendingRemovedNodes.push(n);
+
+                                }
+
+                            }
+
+                        }
+
+                        if (pendingRemovedNodes.length > 0 && !flushTimer) {
+
+                            flushTimer = setTimeout(flushRemovedNodes, 120);
+
+                        }
+
+                    });
+
+                    observer.observe(targetRoot, { childList: true, subtree: true });
+
+                } catch (e) {}
+
+            }
+
+            document.addEventListener('DOMContentLoaded', installDOMRemovalRecycler, true);
+
+            window.addEventListener('load', installDOMRemovalRecycler, true);
+
+
+
+            // 动态回收已完成播放的音效 (SE) 与历史剧本缓存，防止昼夜循环累加爆表
+
+            function recycleFinishedAudioAndScriptCaches(aggressive) {
+
+                try {
+
+                    // 1. 清理滑动窗口中已脱离 DOM 的旧图片引用
+
+                    for (var i = _activeImageSlidingWindow.length - 1; i >= 0; i--) {
+
+                        var item = _activeImageSlidingWindow[i];
+
+                        if (!item || !item.el || !item.el.isConnected) {
+
+                            if (item && item.el) releaseDetachedImageNode(item.el);
+
+                            _activeImageSlidingWindow.splice(i, 1);
+
+                        }
+
+                    }
+
+                    if (aggressive) {
+
+                        while (_activeImageSlidingWindow.length > 4) {
+
+                            var oldItem = _activeImageSlidingWindow.shift();
+
+                            if (oldItem && oldItem.el && !oldItem.el.isConnected) {
+
+                                releaseDetachedImageNode(oldItem.el);
+
+                            }
+
+                        }
+
+                    }
+
+
+
+                    // 2. 卸载 Howler.js 中已经播放完毕的短音效 (SE) 解码缓冲区（保留当前正在播放的 BGM）
+
+                    if (window.Howler && Array.isArray(window.Howler._howls)) {
+
+                        var howls = window.Howler._howls;
+
+                        // 仅允许最多保留最近 6 个音频实例，其余已停止播放的实例立即调用 unload() 释放 PCM 内存
+
+                        var stoppedHowls = [];
+
+                        for (var h = 0; h < howls.length; h++) {
+
+                            var hw = howls[h];
+
+                            if (hw && typeof hw.playing === 'function' && !hw.playing() && !hw._loop) {
+
+                                stoppedHowls.push(hw);
+
+                            }
+
+                        }
+
+                        var keepStopped = aggressive ? 0 : 2;
+
+                        while (stoppedHowls.length > keepStopped) {
+
+                            var oldHowl = stoppedHowls.shift();
+
+                            try {
+
+                                if (oldHowl && typeof oldHowl.unload === 'function') {
+
+                                    oldHowl.unload();
+
+                                }
+
+                            } catch (eH) {}
+
+                        }
+
+                    }
+
+
+
+                    // 3. 清理 Tyrano 引擎内部的 map_se 已停止音效与 cache_scenario 历史剧本缓存
+
+                    if (window.TYRANO && window.TYRANO.kag) {
+
+                        var kag = window.TYRANO.kag;
+
+                        if (kag.tmp && kag.tmp.map_se) {
+
+                            var mapSe = kag.tmp.map_se;
+
+                            for (var seKey in mapSe) {
+
+                                if (Object.prototype.hasOwnProperty.call(mapSe, seKey)) {
+
+                                    var seObj = mapSe[seKey];
+
+                                    if (seObj && typeof seObj.playing === 'function' && !seObj.playing()) {
+
+                                        try { if (typeof seObj.unload === 'function') seObj.unload(); } catch (eSe) {}
+
+                                        delete mapSe[seKey];
+
+                                    } else if (seObj && seObj.paused) {
+
+                                        try { seObj.src = ''; seObj.load(); } catch (eSe2) {}
+
+                                        delete mapSe[seKey];
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+
+                        // 限制 Tyrano 内部 cache_scenario 剧本对象数量不超过 6 个（防止跨天循环不断累积 AST 数组）
+
+                        if (kag.cache_scenario && typeof kag.cache_scenario === 'object') {
+
+                            var scKeys = Object.keys(kag.cache_scenario);
+
+                            var maxSc = aggressive ? 2 : 6;
+
+                            while (scKeys.length > maxSc) {
+
+                                var delSc = scKeys.shift();
+
+                                if (delSc) delete kag.cache_scenario[delSc];
+
+                            }
+
+                        }
+
+                    }
+
+
+
+                    // 4. 限制 _ksTextMemoryCache 滑动窗口大小
+
+                    var ksLimit = aggressive ? 3 : 8;
+
+                    while (_ksCacheOrderQueue.length > ksLimit) {
+
+                        var evictKs = _ksCacheOrderQueue.shift();
+
+                        if (evictKs) delete _ksTextMemoryCache[evictKs];
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+            window.__tyranoTrimMemoryPool = function(keepCount) {
+
+                recycleFinishedAudioAndScriptCaches(true);
+
+            };
+
+            window.__tyranoDynamicGC = function() {
+
+                recycleFinishedAudioAndScriptCaches(false);
 
             };
 
@@ -1605,9 +2041,45 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 剧本与界面模板纯内存缓存池：同一 .ks / .tjs / .html 模板在摸头结束、跨天或打开存读档界面时 0ms 直接从 JS 内存返回
+            // 剧本与界面模板滑动窗口缓存池（最多保留最近 8 个剧本，加载第 9 个时自动淘汰最旧剧本，绝不无限堆积）
 
             var _ksTextMemoryCache = {};
+
+            var _ksCacheOrderQueue = [];
+
+            function putSlidingKsCache(cleanKey, textVal) {
+
+                if (!cleanKey || !textVal) return;
+
+                // 单文件超过 512KB 的超大文本不常驻内存，随用随取走释放
+
+                if (textVal.length > 524288) return;
+
+                var existingIdx = _ksCacheOrderQueue.indexOf(cleanKey);
+
+                if (existingIdx !== -1) {
+
+                    _ksCacheOrderQueue.splice(existingIdx, 1);
+
+                }
+
+                _ksCacheOrderQueue.push(cleanKey);
+
+                _ksTextMemoryCache[cleanKey] = textVal;
+
+                while (_ksCacheOrderQueue.length > 8) {
+
+                    var oldest = _ksCacheOrderQueue.shift();
+
+                    if (oldest) {
+
+                        delete _ksTextMemoryCache[oldest];
+
+                    }
+
+                }
+
+            }
 
 
 
@@ -1773,7 +2245,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                             if (isCacheableText && outText && outText.length > 0) {
 
-                                _ksTextMemoryCache[cleanKey] = outText;
+                                putSlidingKsCache(cleanKey, outText);
 
                             }
 
@@ -1862,6 +2334,120 @@ struct WebPlayerView: UIViewRepresentable {
                         }
 
                     });
+
+
+
+                    // (D) 挂钩 jQuery.fn.empty 与 jQuery.fn.remove：当游戏移除旧背景/旧立绘/旧对话框图层时，立即回收已脱离 DOM 节点的底层纹理
+
+                    if (jq.fn) {
+
+                        var _origEmpty = jq.fn.empty;
+
+                        if (typeof _origEmpty === 'function' && !_origEmpty.__tyranoScrubHooked) {
+
+                            var _scrubEmpty = function() {
+
+                                var detachedList = [];
+
+                                try {
+
+                                    for (var i = 0; i < this.length; i++) {
+
+                                        var container = this[i];
+
+                                        if (container && container.querySelectorAll) {
+
+                                            var sub = container.querySelectorAll('img, canvas, video, audio, div');
+
+                                            for (var j = 0; j < sub.length; j++) {
+
+                                                detachedList.push(sub[j]);
+
+                                            }
+
+                                        }
+
+                                    }
+
+                                } catch (e) {}
+
+                                var ret = _origEmpty.apply(this, arguments);
+
+                                if (detachedList.length > 0) {
+
+                                    setTimeout(function() {
+
+                                        for (var k = 0; k < detachedList.length; k++) {
+
+                                            if (detachedList[k] && !detachedList[k].isConnected) {
+
+                                                scrubSingleDetachedElement(detachedList[k]);
+
+                                            }
+
+                                        }
+
+                                    }, 30);
+
+                                }
+
+                                return ret;
+
+                            };
+
+                            _scrubEmpty.__tyranoScrubHooked = true;
+
+                            jq.fn.empty = _scrubEmpty;
+
+                        }
+
+
+
+                        var _origRemove = jq.fn.remove;
+
+                        if (typeof _origRemove === 'function' && !_origRemove.__tyranoScrubHooked) {
+
+                            var _scrubRemove = function() {
+
+                                var targets = [];
+
+                                for (var i = 0; i < this.length; i++) {
+
+                                    if (this[i]) targets.push(this[i]);
+
+                                }
+
+                                var ret = _origRemove.apply(this, arguments);
+
+                                if (targets.length > 0) {
+
+                                    setTimeout(function() {
+
+                                        for (var k = 0; k < targets.length; k++) {
+
+                                            if (targets[k] && !targets[k].isConnected) {
+
+                                                releaseDetachedMediaOrCanvas(targets[k]);
+
+                                            }
+
+                                        }
+
+                                    }, 30);
+
+                                }
+
+                                return ret;
+
+                            };
+
+                            _scrubRemove.__tyranoScrubHooked = true;
+
+                            jq.fn.remove = _scrubRemove;
+
+                        }
+
+                    }
 
                 } catch (e) {}
 
@@ -3121,6 +3707,50 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+                    // (1.5) 挂钩场景切换与昼夜交替标签（bg / freeimage / mask / cm），每次切换新场景时自动触发滑动窗口旧资源回收
+
+                    if (kag.ftag && kag.ftag.master_tag && !kag.ftag.__tyranoRecyclerHooked) {
+
+                        kag.ftag.__tyranoRecyclerHooked = true;
+
+                        var recycleTags = ['bg', 'freeimage', 'mask', 'clearfix'];
+
+                        for (var rt = 0; rt < recycleTags.length; rt++) {
+
+                            (function(tagName) {
+
+                                var tagObj = kag.ftag.master_tag[tagName];
+
+                                if (tagObj && typeof tagObj.start === 'function' && !tagObj.__tyranoGcWrapped) {
+
+                                    tagObj.__tyranoGcWrapped = true;
+
+                                    var origStart = tagObj.start;
+
+                                    tagObj.start = function(pm) {
+
+                                        var res = origStart.apply(this, arguments);
+
+                                        setTimeout(function() {
+
+                                            recycleFinishedAudioAndScriptCaches(false);
+
+                                        }, 80);
+
+                                        return res;
+
+                                    };
+
+                                }
+
+                            })(recycleTags[rt]);
+
+                        }
+
+                    }
+
+
+
                     // (2) 修复 TF/pre/macro_TF.ks:557行目:If文に誤りがあります（跨宏 [jump] 导致 stack['if'] 的 deep_if 偏移时自动按相对嵌套层级自愈）
 
                     if (kag.ftag && kag.ftag.master_tag && !_patchedTyranoIfTags) {
@@ -3599,6 +4229,18 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // 每 12 秒执行一次轻量级滑动窗口资源巡检，及时释放已播放完的音效和脱离 DOM 的旧立绘纹理
+
+            setInterval(function() {
+
+                installDOMRemovalRecycler();
+
+                recycleFinishedAudioAndScriptCaches(false);
+
+            }, 12000);
+
+
+
             window.__tyranoHookStorageAndSF = hookTyranoStorageAndSF;
 
             hookTyranoStorageAndSF();
@@ -3997,6 +4639,8 @@ struct WebPlayerView: UIViewRepresentable {
 
         private var saveWriteWorkItem: DispatchWorkItem?
 
+        private var memoryGuardTimer: Timer?
+
         private var lastProcessTerminateAt: Date = .distantPast
 
         private let saveIOQueue = DispatchQueue(label: "com.tyrano.save.io", qos: .utility)
@@ -4039,6 +4683,18 @@ struct WebPlayerView: UIViewRepresentable {
 
             )
 
+            // 启动动态内存水位巡检定时器：不等系统杀进程，主动执行“加载新资源、淘汰旧资源”滑动窗口回收
+
+            memoryGuardTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+
+                Task { @MainActor [weak self] in
+
+                    self?.performSlidingWindowMemoryMaintenance()
+
+                }
+
+            }
+
         }
 
 
@@ -4051,7 +4707,35 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+        private func performSlidingWindowMemoryMaintenance() {
+
+            let availBytes = os_proc_available_memory()
+
+            // 当进程可用内存低于 180 MB 时执行深度滑动窗口收缩，平时执行常规滑动淘汰
+
+            if availBytes > 0 && availBytes < 180 * 1024 * 1024 {
+
+                LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 4 * 1024 * 1024)
+
+                URLCache.shared.removeAllCachedResponses()
+
+                webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(4); }", completionHandler: nil)
+
+            } else {
+
+                LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 10 * 1024 * 1024)
+
+                webView?.evaluateJavaScript("if (typeof window.__tyranoDynamicGC === 'function') { window.__tyranoDynamicGC(); }", completionHandler: nil)
+
+            }
+
+        }
+
+
+
         deinit {
+
+            memoryGuardTimer?.invalidate()
 
             NotificationCenter.default.removeObserver(self)
 
@@ -4373,7 +5057,7 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-/// 高性能本机 HTTP 游戏资源服务器（v1.8.0 长时间游玩防崩与存档增强版）：
+/// 高性能本机 HTTP 游戏资源服务器（v1.9.0 长时间游玩防崩与存档增强版）：
 
 /// 1. 自动将 iOS 进程文件描述符上限从默认 256 提升至 4096，并移除 .mappedIfSafe 句柄驻留，彻底解决游玩 15~20 分钟后 status.png / save.html 突然报 file not found 的问题
 
@@ -4405,19 +5089,23 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
     private var sanitizedTextCache: [String: Data] = [:]
 
+    private var sanitizedTextOrder: [String] = []
+
     private var liveSavesSnapshot: [String: String] = [:]
 
-    private let assetMemoryCache: NSCache<NSString, NSData> = {
 
-        let cache = NSCache<NSString, NSData>()
 
-        cache.totalCostLimit = 48 * 1024 * 1024 // 48 MB 自动受系统管理
+    // 严格定长滑动窗口资源池（最多常驻 12 MB / 20 个热点资源，新资源进入时立即淘汰最旧资源，绝不无限上涨）
 
-        cache.countLimit = 240
+    private var slidingAssetMap: [String: Data] = [:]
 
-        return cache
+    private var slidingAssetOrder: [String] = []
 
-    }()
+    private var slidingAssetTotalBytes: Int = 0
+
+    private let maxSlidingPoolBytes: Int = 12 * 1024 * 1024
+
+    private let maxSlidingPoolItems: Int = 20
 
 
 
@@ -4493,17 +5181,135 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
+    private func clearSlidingPoolLocked() {
+
+        slidingAssetMap.removeAll(keepingCapacity: false)
+
+        slidingAssetOrder.removeAll(keepingCapacity: false)
+
+        slidingAssetTotalBytes = 0
+
+    }
+
+
+
+    private func getSlidingAsset(forKey key: String) -> Data? {
+
+        lock.lock()
+
+        defer { lock.unlock() }
+
+        guard let data = slidingAssetMap[key] else { return nil }
+
+        if let idx = slidingAssetOrder.firstIndex(of: key) {
+
+            slidingAssetOrder.remove(at: idx)
+
+        }
+
+        slidingAssetOrder.append(key)
+
+        return data
+
+    }
+
+
+
+    private func putSlidingAsset(_ data: Data, forKey key: String) {
+
+        // 超过 2.5MB 的大体积文件（如巨幅 CG 或长音频）直接流式返回，不驻留滑动池，随用随放
+
+        guard data.count <= 2_621_440 else { return }
+
+        lock.lock()
+
+        defer { lock.unlock() }
+
+        if let old = slidingAssetMap.removeValue(forKey: key) {
+
+            slidingAssetTotalBytes -= old.count
+
+            if let idx = slidingAssetOrder.firstIndex(of: key) {
+
+                slidingAssetOrder.remove(at: idx)
+
+            }
+
+        }
+
+        slidingAssetMap[key] = data
+
+        slidingAssetOrder.append(key)
+
+        slidingAssetTotalBytes += data.count
+
+
+
+        // 动态滑动淘汰：当新资源加入后超出数量（20个）或容量（12MB）上限，立即删除最早加载的旧资源
+
+        while (slidingAssetOrder.count > maxSlidingPoolItems || slidingAssetTotalBytes > maxSlidingPoolBytes),
+
+              let oldestKey = slidingAssetOrder.first {
+
+            slidingAssetOrder.removeFirst()
+
+            if let removed = slidingAssetMap.removeValue(forKey: oldestKey) {
+
+                slidingAssetTotalBytes = max(0, slidingAssetTotalBytes - removed.count)
+
+            }
+
+        }
+
+    }
+
+
+
+    func trimSlidingWindow(maxBytes: Int) {
+
+        lock.lock()
+
+        while slidingAssetTotalBytes > maxBytes, let oldestKey = slidingAssetOrder.first {
+
+            slidingAssetOrder.removeFirst()
+
+            if let removed = slidingAssetMap.removeValue(forKey: oldestKey) {
+
+                slidingAssetTotalBytes = max(0, slidingAssetTotalBytes - removed.count)
+
+            }
+
+        }
+
+        while sanitizedTextOrder.count > 12, let oldestTxt = sanitizedTextOrder.first {
+
+            sanitizedTextOrder.removeFirst()
+
+            sanitizedTextCache.removeValue(forKey: oldestTxt)
+
+        }
+
+        lock.unlock()
+
+    }
+
+
+
     func clearMemoryCaches() {
 
         lock.lock()
 
-        resolvedPathCache.removeAll()
+        resolvedPathCache.removeAll(keepingCapacity: false)
 
-        sanitizedTextCache.removeAll()
+        sanitizedTextCache.removeAll(keepingCapacity: false)
+
+        sanitizedTextOrder.removeAll(keepingCapacity: false)
+
+        clearSlidingPoolLocked()
 
         lock.unlock()
 
-        assetMemoryCache.removeAllObjects()
+        URLCache.shared.removeAllCachedResponses()
 
     }
 
@@ -4525,7 +5331,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
             self.sanitizedTextCache.removeAll()
 
-            self.assetMemoryCache.removeAllObjects()
+            self.sanitizedTextOrder.removeAll()
+
+            self.clearSlidingPoolLocked()
 
         }
 
@@ -4755,7 +5563,11 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
             clientQueue.async { [weak self] in
 
-                self?.handleClientConnection(clientSock)
+                autoreleasepool {
+
+                    self?.handleClientConnection(clientSock)
+
+                }
 
             }
 
@@ -5163,7 +5975,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                     if method != "HEAD" && sliceLen > 0 {
 
-                        if let cachedData = assetMemoryCache.object(forKey: resolvedFileURL.path as NSString) as Data?,
+                        if let cachedData = getSlidingAsset(forKey: resolvedFileURL.path),
 
                            clampedEnd < cachedData.count {
 
@@ -5305,9 +6117,13 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
     private func isStaticCacheableAsset(ext: String) -> Bool {
 
+        // 关键内存优化：仅允许核心引擎代码 (js/css) 与字体在 WebKit 内部长缓存；
+
+        // 立绘、CG、背景图、语音、音效、视频严禁标记为 immutable 长缓存，否则 WebKit 的 C++ MemoryCache 会将过去几天的所有大图全部锁在内存里导致两三天循环后爆内存重启！
+
         switch ext {
 
-        case "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "woff", "woff2", "ttf", "otf", "ogg", "oga", "m4a", "mp4a", "mp3", "wav", "mp4", "m4v", "webm", "ogv", "js", "css", "ks", "tjs":
+        case "js", "css", "woff", "woff2", "ttf", "otf":
 
             return true
 
@@ -5325,11 +6141,13 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         if isStaticCacheableAsset(ext: ext) {
 
-            return "public, max-age=86400, immutable"
+            return "public, max-age=3600"
 
         }
 
-        return "no-cache"
+        // 对于图片、音视频与剧本，由本机高速滑动窗口池按需秒回，并指示 WebKit 渲染完离屏后立即释放内存
+
+        return "no-store"
 
     }
 
@@ -5607,9 +6425,17 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
                     lock.lock()
 
-                    if sanitizedTextCache.count > 256 {
+                    if sanitizedTextCache[cacheKey] == nil {
 
-                        sanitizedTextCache.removeAll(keepingCapacity: true)
+                        sanitizedTextOrder.append(cacheKey)
+
+                        while sanitizedTextOrder.count > 16, let oldest = sanitizedTextOrder.first {
+
+                            sanitizedTextOrder.removeFirst()
+
+                            sanitizedTextCache.removeValue(forKey: oldest)
+
+                        }
 
                     }
 
@@ -5629,9 +6455,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-        if let memCached = assetMemoryCache.object(forKey: cacheKey as NSString) {
+        if let memCached = getSlidingAsset(forKey: cacheKey) {
 
-            return memCached as Data
+            return memCached
 
         }
 
@@ -5639,11 +6465,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
 
-        if data.count <= 6 * 1024 * 1024 {
-
-            assetMemoryCache.setObject(data as NSData, forKey: cacheKey as NSString, cost: data.count)
-
-        }
+        putSlidingAsset(data, forKey: cacheKey)
 
         return data
 
