@@ -845,7 +845,7 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 拦截由于缺图或宏跳转 If 栈偏移引发的阻塞式 alert 报错弹窗，转为自愈恢复并继续推进指令
+            // 拦截由于缺图、标签跨文件或宏跳转引发的阻塞式 alert 报错弹窗，转为自愈恢复并继续推进指令
 
             var _origWindowAlert = window.alert;
 
@@ -855,7 +855,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                 sendLog('WARN', ['[拦截引擎报错弹窗]', text]);
 
-                if (text.indexOf('Error:') === 0 || text.indexOf('file not found') !== -1 || text.indexOf('見つかりません') !== -1 || text.indexOf('誤りがあります') !== -1) {
+                if (text.indexOf('Error:') === 0 || text.indexOf('file not found') !== -1 || text.indexOf('見つかりません') !== -1 || text.indexOf('誤りがあります') !== -1 || text.indexOf('は存在しません') !== -1) {
 
                     setTimeout(function() {
 
@@ -2143,19 +2143,23 @@ struct WebPlayerView: UIViewRepresentable {
 
                         }
 
-                        // 限制 Tyrano 内部 cache_scenario 剧本对象数量不超过 8 个（防止跨天循环不断累积 AST 数组）
+                        // 限制 Tyrano 内部 cache_scenario 剧本对象数量不超过 18 个（保留换装/商店/主循环等常驻剧本的标签映射，同时防止无限累积）
 
                         if (kag.cache_scenario && typeof kag.cache_scenario === 'object') {
 
                             var scKeys = Object.keys(kag.cache_scenario);
 
-                            var maxSc = aggressive ? 3 : 8;
+                            var maxSc = aggressive ? 10 : 18;
 
                             while (scKeys.length > maxSc) {
 
                                 var delSc = scKeys.shift();
 
-                                if (delSc) delete kag.cache_scenario[delSc];
+                                if (delSc && delSc !== kag.stat.current_scenario) {
+
+                                    delete kag.cache_scenario[delSc];
+
+                                }
 
                             }
 
@@ -3985,13 +3989,17 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // (1.5) 挂钩场景切换与昼夜交替标签（bg / freeimage / mask / cm），每次切换新场景时自动触发滑动窗口旧资源回收
+                    // (1.5) 挂钩大场景切换与昼夜交替标签（bg / mask）：
+
+                    // 在床上特殊模式演出期间（底图不变、局部差分切换）绝不打断；
+
+                    // 一旦结束床上特殊场景并触发 [bg] 或 [mask] 进入第二天/切换房间，分两阶段（80ms + 650ms）立即强制清空上一场景已脱离 DOM 的全套差分图片与音效缓存
 
                     if (kag.ftag && kag.ftag.master_tag && !kag.ftag.__tyranoRecyclerHooked) {
 
                         kag.ftag.__tyranoRecyclerHooked = true;
 
-                        var recycleTags = ['bg', 'mask']; // 仅在大场景背景/黑屏转场时触发回收，特写局部差分序列切换期间绝不打断
+                        var recycleTags = ['bg', 'mask'];
 
                         for (var rt = 0; rt < recycleTags.length; rt++) {
 
@@ -4015,6 +4023,12 @@ struct WebPlayerView: UIViewRepresentable {
 
                                         }, 80);
 
+                                        setTimeout(function() {
+
+                                            recycleFinishedAudioAndScriptCaches(true);
+
+                                        }, 650);
+
                                         return res;
 
                                     };
@@ -4029,7 +4043,223 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // (2) 修复 TF/pre/macro_TF.ks:557行目:If文に誤りがあります（跨宏 [jump] 导致 stack['if'] 的 deep_if 偏移时自动按相对嵌套层级自愈）
+                    // (1.6) 挂钩 kag.ftag.nextOrder 同步调用栈深度蹦床保护（彻底根治床上特殊模式结束跨天、换装或商店渲染大量按钮时触发 RangeError: Maximum call stack size exceeded 导致主界面按钮消失与页面卡死）
+
+                    if (kag.ftag && typeof kag.ftag.nextOrder === 'function' && !kag.ftag.__tyranoStackTrampolineInstalled) {
+
+                        kag.ftag.__tyranoStackTrampolineInstalled = true;
+
+                        var _origNextOrder = kag.ftag.nextOrder;
+
+                        var _syncNextOrderDepth = 0;
+
+                        var _MAX_SYNC_NEXT_ORDER_DEPTH = 75;
+
+
+
+                        kag.ftag.nextOrder = function() {
+
+                            var selfFtag = this;
+
+                            var args = arguments;
+
+                            if (_syncNextOrderDepth >= _MAX_SYNC_NEXT_ORDER_DEPTH) {
+
+                                setTimeout(function() {
+
+                                    try {
+
+                                        _origNextOrder.apply(selfFtag, args);
+
+                                    } catch (eDeferred) {
+
+                                        sendLog('WARN', ['[调用栈分片自愈] 异步恢复指令流异常已拦截:', String(eDeferred)]);
+
+                                        recoverStuckUiState();
+
+                                    }
+
+                                }, 0);
+
+                                return;
+
+                            }
+
+                            _syncNextOrderDepth++;
+
+                            try {
+
+                                return _origNextOrder.apply(selfFtag, args);
+
+                            } catch (err) {
+
+                                var errText = String(err || '');
+
+                                if (errText.indexOf('call stack') !== -1 || errText.indexOf('RangeError') !== -1) {
+
+                                    sendLog('WARN', ['[栈溢出自愈] 已拦截深层同步递归并自动切换异步分片继续渲染按钮']);
+
+                                    setTimeout(function() {
+
+                                        try {
+
+                                            _origNextOrder.apply(selfFtag, args);
+
+                                        } catch (eRetry) {
+
+                                            recoverStuckUiState();
+
+                                        }
+
+                                    }, 0);
+
+                                    return;
+
+                                }
+
+                                throw err;
+
+                            } finally {
+
+                                _syncNextOrderDepth--;
+
+                            }
+
+                        };
+
+                    }
+
+
+
+                    // (1.7) 挂钩 kag.ftag.nextOrderWithLabel 跨剧本标签自愈（彻底解决换装界面点击分类页签时因 current_scenario 停留在 macro_TF.ks 而报错 ラベル：'tab_change' は存在しません）
+
+                    if (kag.ftag && typeof kag.ftag.nextOrderWithLabel === 'function' && !kag.ftag.__tyranoLabelResolverInstalled) {
+
+                        kag.ftag.__tyranoLabelResolverInstalled = true;
+
+                        var _origNextOrderWithLabel = kag.ftag.nextOrderWithLabel;
+
+
+
+                        kag.ftag.nextOrderWithLabel = function(label_name, scenario_file) {
+
+                            var selfFtag = this;
+
+                            if (label_name) {
+
+                                var cleanLabel = String(label_name);
+
+                                if (cleanLabel.charAt(0) === '*') {
+
+                                    cleanLabel = cleanLabel.slice(1);
+
+                                }
+
+                                var targetSc = scenario_file || (kag.stat && kag.stat.current_scenario) || '';
+
+                                var curMap = (kag.stat && kag.stat.map_label) ? kag.stat.map_label : {};
+
+                                var isCurrentScenario = (!scenario_file || scenario_file === (kag.stat && kag.stat.current_scenario));
+
+
+
+                                if (isCurrentScenario && !curMap[cleanLabel]) {
+
+                                    var matchedScenario = null;
+
+                                    // 1. 优先从 call 栈中的上层调用剧本（如 dress.ks / shop.ks / loop.ks）查找该标签
+
+                                    if (kag.stat && kag.stat.stack && Array.isArray(kag.stat.stack['call']) && kag.cache_scenario) {
+
+                                        var callStk = kag.stat.stack['call'];
+
+                                        for (var c = callStk.length - 1; c >= 0; c--) {
+
+                                            var callerSc = callStk[c] && callStk[c].storage;
+
+                                            if (callerSc && kag.cache_scenario[callerSc] && kag.cache_scenario[callerSc].map_label && kag.cache_scenario[callerSc].map_label[cleanLabel]) {
+
+                                                matchedScenario = callerSc;
+
+                                                while (callStk.length > c) {
+
+                                                    callStk.pop();
+
+                                                }
+
+                                                break;
+
+                                            }
+
+                                        }
+
+                                    }
+
+                                    // 2. 从所有已缓存剧本 (kag.cache_scenario) 中搜索包含该标签的剧本
+
+                                    if (!matchedScenario && kag.cache_scenario) {
+
+                                        for (var scKey in kag.cache_scenario) {
+
+                                            if (Object.prototype.hasOwnProperty.call(kag.cache_scenario, scKey)) {
+
+                                                var scObj = kag.cache_scenario[scKey];
+
+                                                if (scObj && scObj.map_label && scObj.map_label[cleanLabel]) {
+
+                                                    matchedScenario = scKey;
+
+                                                    break;
+
+                                                }
+
+                                            }
+
+                                        }
+
+                                    }
+
+                                    // 3. 针对 Teaching Feeling 专有核心标签的确定性兜底映射
+
+                                    if (!matchedScenario) {
+
+                                        if (cleanLabel === 'tab_change' || cleanLabel.indexOf('dress') !== -1) {
+
+                                            matchedScenario = 'TF/sys/dress.ks';
+
+                                        }
+
+                                    }
+
+                                    if (matchedScenario && matchedScenario !== targetSc && typeof kag.loadScenario === 'function' && typeof selfFtag.buildTag === 'function') {
+
+                                        sendLog('WARN', ['[标签跨文件自愈] 自动将标签 *' + cleanLabel + ' 重定向至所属剧本: ' + matchedScenario]);
+
+                                        kag.stat.current_scenario = matchedScenario;
+
+                                        kag.loadScenario(matchedScenario, function(array_tag) {
+
+                                            selfFtag.buildTag(array_tag, cleanLabel);
+
+                                        });
+
+                                        return;
+
+                                    }
+
+                                }
+
+                            }
+
+                            return _origNextOrderWithLabel.call(selfFtag, label_name, scenario_file);
+
+                        };
+
+                    }
+
+
+
+                    // (2) 精准修复 TyranoScript [if] / [elsif] / [else] / [endif] 标签（读取 tag.pm.deep_if 原生深度，并在跨宏 [jump] 导致 stack['if'] 残留内层条目时自动对齐栈深度，杜绝误进 [else] 死循环）
 
                     if (kag.ftag && kag.ftag.master_tag && !_patchedTyranoIfTags) {
 
@@ -4038,6 +4268,90 @@ struct WebPlayerView: UIViewRepresentable {
                         if (mt['if'] && mt['elsif'] && mt['else'] && mt['endif']) {
 
                             _patchedTyranoIfTags = true;
+
+
+
+                            var getTagDeep = function(tagObj, pmObj) {
+
+                                if (pmObj && pmObj.deep_if !== undefined && pmObj.deep_if !== null) {
+
+                                    return Number(pmObj.deep_if);
+
+                                }
+
+                                if (tagObj) {
+
+                                    if (tagObj.pm && tagObj.pm.deep_if !== undefined && tagObj.pm.deep_if !== null) {
+
+                                        return Number(tagObj.pm.deep_if);
+
+                                    }
+
+                                    if (tagObj.deep_if !== undefined && tagObj.deep_if !== null) {
+
+                                        return Number(tagObj.deep_if);
+
+                                    }
+
+                                }
+
+                                return 0;
+
+                            };
+
+
+
+                            var alignIfStackToDeep = function(kagInst, expectedDeep, defaultBoolIfMissing) {
+
+                                if (!kagInst || !kagInst.stat || !kagInst.stat.stack) {
+
+                                    return { bool: defaultBoolIfMissing, deep: expectedDeep };
+
+                                }
+
+                                var stk = kagInst.stat.stack['if'];
+
+                                if (!Array.isArray(stk)) {
+
+                                    stk = [];
+
+                                    kagInst.stat.stack['if'] = stk;
+
+                                }
+
+                                if (stk.length > 0 && stk[stk.length - 1] && stk[stk.length - 1].deep == expectedDeep) {
+
+                                    return stk[stk.length - 1];
+
+                                }
+
+                                // 若内层 [if] 因执行了 [jump] 未经过 [endif] 而残留在栈顶，向下回溯找到当前层级的 expectedDeep 并弹出残留项
+
+                                for (var s = stk.length - 1; s >= 0; s--) {
+
+                                    if (stk[s] && stk[s].deep == expectedDeep) {
+
+                                        while (stk.length - 1 > s) {
+
+                                            stk.pop();
+
+                                        }
+
+                                        return stk[stk.length - 1];
+
+                                    }
+
+                                }
+
+                                // 若通过 [jump] 直接跳入了某个分支内部并在分支末尾遇到了 [elsif]/[else]，说明前置分支已执行完毕，此时压入 bool:true 以跳过后续 [elsif]/[else]
+
+                                var fallbackEntry = { bool: defaultBoolIfMissing, deep: expectedDeep };
+
+                                stk.push(fallbackEntry);
+
+                                return fallbackEntry;
+
+                            };
 
 
 
@@ -4051,21 +4365,23 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                                // 第一遍：按原生 deep_if 精确匹配
+                                // 第一遍：按原生 tag.pm.deep_if 精确匹配（无 2000 行上限，兼容 H_scene.ks / macro_TF.ks 超长剧本）
 
-                                for (var i = 0; i < 2000; i++) {
+                                for (var scanIdx = startIdx + 1; scanIdx < arrayTag.length; scanIdx++) {
 
-                                    ftag.current_order_index++;
+                                    var tag = arrayTag[scanIdx];
 
-                                    if (ftag.current_order_index >= arrayTag.length) break;
+                                    if (!tag) continue;
 
-                                    var tag = arrayTag[ftag.current_order_index];
+                                    var tagDeep = getTagDeep(tag, null);
 
-                                    if (!tag) break;
-
-                                    if (tag.name === 'endif' && tag.deep_if == startDeep) {
+                                    if (tag.name === 'endif' && tagDeep == startDeep) {
 
                                         if (targetMap['endif']) {
+
+                                            ftag.current_order_index = scanIdx;
+
+                                            alignIfStackToDeep(kagInst, startDeep, true);
 
                                             kagInst.popStack('if');
 
@@ -4077,9 +4393,9 @@ struct WebPlayerView: UIViewRepresentable {
 
                                         break;
 
-                                    } else if (targetMap[tag.name] && tag.deep_if == startDeep) {
+                                    } else if (targetMap[tag.name] && tagDeep == startDeep) {
 
-                                        ftag.current_order_index--;
+                                        ftag.current_order_index = scanIdx - 1;
 
                                         ftag.nextOrder();
 
@@ -4091,7 +4407,7 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                                // 第二遍：因之前在 [if] 块内执行了 [jump] 导致 deep_if 失步时，按相对 [if]...[endif] 嵌套层级自愈匹配
+                                // 第二遍：仅当跨文件宏导致 deep_if 编号不一致时，按相对 [if]...[endif] 嵌套层级匹配（保持原有 bool 状态，绝不重置为 false）
 
                                 var nest = 0;
 
@@ -4113,8 +4429,6 @@ struct WebPlayerView: UIViewRepresentable {
 
                                             if (kagInst.getStack('if')) kagInst.popStack('if');
 
-                                            sendLog('WARN', ['[脚本自愈] 已自动修复跨宏跳转导致的 If 栈深度偏移 (line ' + (t.line || '') + ')']);
-
                                             ftag.nextOrder();
 
                                             return true;
@@ -4125,15 +4439,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                                     } else if ((t.name === 'elsif' || t.name === 'else') && nest === 0 && targetMap[t.name]) {
 
+                                        var tDeep = getTagDeep(t, null);
+
                                         var topSt = kagInst.getStack('if');
 
                                         if (topSt) {
 
-                                            topSt.deep = t.deep_if;
-
-                                        } else {
-
-                                            kagInst.pushStack('if', { bool: false, deep: t.deep_if });
+                                            topSt.deep = tDeep;
 
                                         }
 
@@ -4149,7 +4461,9 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                                ftag.current_order_index = Math.min(startIdx + 1, Math.max(0, arrayTag.length - 1));
+                                // 若直到当前剧本末尾都未找到闭合标签，直接推进到剧本末尾结束当前段，绝不回退到 startIdx+1 造成死循环
+
+                                ftag.current_order_index = Math.max(startIdx, arrayTag.length - 1);
 
                                 ftag.nextOrder();
 
@@ -4161,21 +4475,25 @@ struct WebPlayerView: UIViewRepresentable {
 
                             mt['if'].start = function(pm) {
 
+                                var curTag = (this.kag.ftag && this.kag.ftag.array_tag) ? this.kag.ftag.array_tag[this.kag.ftag.current_order_index] : null;
+
+                                var myDeep = getTagDeep(curTag, pm);
+
                                 var bool = false;
 
-                                try { bool = this.kag.embScript(pm.exp); } catch (e) { bool = false; }
+                                try { bool = !!this.kag.embScript(pm.exp); } catch (e) { bool = false; }
 
                                 if (bool) {
 
-                                    this.kag.pushStack('if', { bool: true, deep: pm.deep_if });
+                                    this.kag.pushStack('if', { bool: true, deep: myDeep });
 
                                     this.kag.ftag.nextOrder();
 
                                 } else {
 
-                                    this.kag.pushStack('if', { bool: false, deep: pm.deep_if });
+                                    this.kag.pushStack('if', { bool: false, deep: myDeep });
 
-                                    jumpToMatchingIfBranch(this.kag, { 'else': 1, 'elsif': 1, 'endif': 1 }, pm.deep_if);
+                                    jumpToMatchingIfBranch(this.kag, { 'else': 1, 'elsif': 1, 'endif': 1 }, myDeep);
 
                                 }
 
@@ -4185,29 +4503,23 @@ struct WebPlayerView: UIViewRepresentable {
 
                             mt['elsif'].start = function(pm) {
 
-                                var stackIf = this.kag.getStack('if');
+                                var curTag = (this.kag.ftag && this.kag.ftag.array_tag) ? this.kag.ftag.array_tag[this.kag.ftag.current_order_index] : null;
 
-                                if (!stackIf) {
+                                var myDeep = getTagDeep(curTag, pm);
 
-                                    stackIf = { bool: false, deep: pm.deep_if };
-
-                                    this.kag.pushStack('if', stackIf);
-
-                                } else if (stackIf.deep != pm.deep_if) {
-
-                                    stackIf.deep = pm.deep_if;
-
-                                }
+                                var stackIf = alignIfStackToDeep(this.kag, myDeep, true);
 
                                 if (stackIf.bool === false) {
 
                                     var bool = false;
 
-                                    try { bool = this.kag.embScript(pm.exp); } catch (e) { bool = false; }
+                                    try { bool = !!this.kag.embScript(pm.exp); } catch (e) { bool = false; }
 
                                     if (bool) {
 
-                                        this.kag.setStack('if', { bool: true, deep: pm.deep_if });
+                                        stackIf.bool = true;
+
+                                        this.kag.setStack('if', { bool: true, deep: myDeep });
 
                                         this.kag.ftag.nextOrder();
 
@@ -4217,7 +4529,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                                 }
 
-                                jumpToMatchingIfBranch(this.kag, { 'else': 1, 'elsif': 1, 'endif': 1 }, pm.deep_if);
+                                jumpToMatchingIfBranch(this.kag, { 'else': 1, 'elsif': 1, 'endif': 1 }, myDeep);
 
                             };
 
@@ -4225,29 +4537,23 @@ struct WebPlayerView: UIViewRepresentable {
 
                             mt['else'].start = function(pm) {
 
-                                var stackIf = this.kag.getStack('if');
+                                var curTag = (this.kag.ftag && this.kag.ftag.array_tag) ? this.kag.ftag.array_tag[this.kag.ftag.current_order_index] : null;
 
-                                if (!stackIf) {
+                                var myDeep = getTagDeep(curTag, pm);
 
-                                    stackIf = { bool: false, deep: pm.deep_if };
-
-                                    this.kag.pushStack('if', stackIf);
-
-                                } else if (stackIf.deep != pm.deep_if) {
-
-                                    stackIf.deep = pm.deep_if;
-
-                                }
+                                var stackIf = alignIfStackToDeep(this.kag, myDeep, true);
 
                                 if (stackIf.bool === false) {
 
-                                    this.kag.setStack('if', { bool: true, deep: pm.deep_if });
+                                    stackIf.bool = true;
+
+                                    this.kag.setStack('if', { bool: true, deep: myDeep });
 
                                     this.kag.ftag.nextOrder();
 
                                 } else {
 
-                                    jumpToMatchingIfBranch(this.kag, { 'endif': 1 }, pm.deep_if);
+                                    jumpToMatchingIfBranch(this.kag, { 'endif': 1 }, myDeep);
 
                                 }
 
@@ -4255,7 +4561,35 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                            mt['endif'].start = function() {
+                            mt['endif'].start = function(pm) {
+
+                                var curTag = (this.kag.ftag && this.kag.ftag.array_tag) ? this.kag.ftag.array_tag[this.kag.ftag.current_order_index] : null;
+
+                                var myDeep = getTagDeep(curTag, pm);
+
+                                if (this.kag.stat && this.kag.stat.stack && Array.isArray(this.kag.stat.stack['if'])) {
+
+                                    var stk = this.kag.stat.stack['if'];
+
+                                    for (var s = stk.length - 1; s >= 0; s--) {
+
+                                        if (stk[s] && stk[s].deep == myDeep) {
+
+                                            while (stk.length >= s + 1) {
+
+                                                stk.pop();
+
+                                            }
+
+                                            this.kag.ftag.nextOrder();
+
+                                            return;
+
+                                        }
+
+                                    }
+
+                                }
 
                                 if (this.kag.getStack('if')) {
 
