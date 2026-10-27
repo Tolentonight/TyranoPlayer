@@ -1473,35 +1473,177 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 5.5 动态滑动窗口资源回收引擎（“加载新资源 -> 自动销毁已用完的旧资源”，严控内存水位永不爆表）
+            // 5.5 场景感知型双层动态滑动窗口资源回收引擎 v2.0（兼顾多图层换装叠图 + 特写长序列局部差分防崩 + 跨昼夜防爆表）
 
-            // 仅保留当前画面正在使用的最多 8 张活动图片引用；一旦新图片加载进入队列，立即剥离并销毁滑出窗口的旧图片底层解码纹理
+            // 活动图片窗口扩容至 48 张（轻松容纳 15~25 层换装纸娃娃 + 20+ 张高光/汗液/表情局部差分序列），并引入三大防误删铁律：
+
+            // (1) 在屏绝对免疫（isConnected === true 绝不触碰）
+
+            // (2) 离屏 2.5 秒宽限期（未挂载过的预加载 Image 绝不清理，移除出 DOM 满 2500ms 后才释放底层显存）
+
+            // (3) data-tyrano-orig-src 零帧自动复原（若旧节点被引擎再次挂回 DOM，渲染前瞬间自动恢复原图路径，彻底杜绝差分黑块或崩溃）
 
             var _activeImageSlidingWindow = [];
 
-            var _ACTIVE_IMG_WINDOW_MAX = 8;
+            var _ACTIVE_IMG_WINDOW_MAX = 48;
+
+            var _DETACHED_GRACE_MS = 2500;
 
 
 
-            function releaseDetachedImageNode(imgNode) {
+            function restoreDetachedNodeIfNeeded(node) {
+
+                try {
+
+                    if (!node || node.nodeType !== 1) return;
+
+                    node.__tyranoWasMounted = true;
+
+                    node.__tyranoDetachedAt = 0;
+
+                    var tag = String(node.tagName || '').toUpperCase();
+
+                    if (tag === 'IMG') {
+
+                        var savedSrc = node.getAttribute('data-tyrano-orig-src');
+
+                        var curSrc = node.getAttribute('src') || '';
+
+                        if (savedSrc && (!curSrc || curSrc === TRANSPARENT_PLACEHOLDER_PNG)) {
+
+                            node.__tyranoReleased = false;
+
+                            node.setAttribute('src', savedSrc);
+
+                        }
+
+                    }
+
+                    if (node.style && node.getAttribute) {
+
+                        var savedBg = node.getAttribute('data-tyrano-orig-bg');
+
+                        if (savedBg && (!node.style.backgroundImage || node.style.backgroundImage === 'none')) {
+
+                            node.style.backgroundImage = savedBg;
+
+                        }
+
+                    }
+
+                    if (node.querySelectorAll) {
+
+                        var subImgs = node.querySelectorAll('img[data-tyrano-orig-src]');
+
+                        for (var i = 0; i < subImgs.length; i++) {
+
+                            var img = subImgs[i];
+
+                            img.__tyranoWasMounted = true;
+
+                            img.__tyranoDetachedAt = 0;
+
+                            var sSrc = img.getAttribute('data-tyrano-orig-src');
+
+                            var cSrc = img.getAttribute('src') || '';
+
+                            if (sSrc && (!cSrc || cSrc === TRANSPARENT_PLACEHOLDER_PNG)) {
+
+                                img.__tyranoReleased = false;
+
+                                img.setAttribute('src', sSrc);
+
+                            }
+
+                        }
+
+                        var subBgs = node.querySelectorAll('[data-tyrano-orig-bg]');
+
+                        for (var j = 0; j < subBgs.length; j++) {
+
+                            var bgEl = subBgs[j];
+
+                            bgEl.__tyranoWasMounted = true;
+
+                            bgEl.__tyranoDetachedAt = 0;
+
+                            var sBg = bgEl.getAttribute('data-tyrano-orig-bg');
+
+                            if (sBg && bgEl.style && (!bgEl.style.backgroundImage || bgEl.style.backgroundImage === 'none')) {
+
+                                bgEl.style.backgroundImage = sBg;
+
+                            }
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+            function releaseDetachedImageNode(imgNode, forceImmediate) {
 
                 try {
 
                     if (!imgNode || imgNode.nodeType !== 1) return;
 
-                    // 若图片仍挂载在当前可见 DOM 树上，则绝不破坏当前画面
+                    // 铁律 1：只要图片仍挂载在当前可见 DOM 树上（底图、衣服图层、正在显示的差分高光/汗液），100% 免疫，绝不触碰
 
-                    if (imgNode.isConnected) return;
+                    if (imgNode.isConnected) {
+
+                        imgNode.__tyranoWasMounted = true;
+
+                        imgNode.__tyranoDetachedAt = 0;
+
+                        return;
+
+                    }
+
+                    // 铁律 2：尚未挂载上屏的预加载 new Image() 对象绝不提前销毁，防止差分序列预加载被误杀
+
+                    if (!imgNode.__tyranoWasMounted) return;
+
+
+
+                    var now = Date.now();
+
+                    if (!imgNode.__tyranoDetachedAt) {
+
+                        imgNode.__tyranoDetachedAt = now;
+
+                        if (!forceImmediate) return;
+
+                    }
+
+                    if (!forceImmediate && (now - imgNode.__tyranoDetachedAt < _DETACHED_GRACE_MS)) {
+
+                        return;
+
+                    }
 
                     if (imgNode.__tyranoReleased) return;
+
+
+
+                    // 铁律 3：剥离离屏纹理前备份原始路径到 data-tyrano-orig-src，万一后续差分序列再次复用该 DOM 节点可瞬間自愈恢复
+
+                    var curSrc = imgNode.getAttribute('src') || imgNode.src || '';
+
+                    if (curSrc && curSrc !== TRANSPARENT_PLACEHOLDER_PNG && curSrc.indexOf('data:') !== 0) {
+
+                        imgNode.setAttribute('data-tyrano-orig-src', curSrc);
+
+                    }
 
                     imgNode.__tyranoReleased = true;
 
                     imgNode.onload = null;
 
                     imgNode.onerror = null;
-
-                    // 关键：将离屏/已移除的 <img> 的 src 置为空并移除属性，强制 WebKit 立即释放 C++ BitmapImage / GPU 显存纹理
 
                     imgNode.src = TRANSPARENT_PLACEHOLDER_PNG;
 
@@ -1515,17 +1657,45 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            function scrubSingleDetachedElement(el) {
+            function scrubSingleDetachedElement(el, forceImmediate) {
 
                 try {
 
-                    if (!el || el.nodeType !== 1 || el.isConnected) return;
+                    if (!el || el.nodeType !== 1) return;
+
+                    if (el.isConnected) {
+
+                        el.__tyranoWasMounted = true;
+
+                        el.__tyranoDetachedAt = 0;
+
+                        return;
+
+                    }
+
+                    if (!el.__tyranoWasMounted) return;
+
+                    var now = Date.now();
+
+                    if (!el.__tyranoDetachedAt) {
+
+                        el.__tyranoDetachedAt = now;
+
+                        if (!forceImmediate) return;
+
+                    }
+
+                    if (!forceImmediate && (now - el.__tyranoDetachedAt < _DETACHED_GRACE_MS)) {
+
+                        return;
+
+                    }
 
                     var tag = String(el.tagName || '').toUpperCase();
 
                     if (tag === 'IMG') {
 
-                        releaseDetachedImageNode(el);
+                        releaseDetachedImageNode(el, true);
 
                     } else if (tag === 'CANVAS') {
 
@@ -1549,9 +1719,15 @@ struct WebPlayerView: UIViewRepresentable {
 
                     }
 
-                    // 关键修复：Tyrano 的 [bg] 背景切换大量使用 div 的 style.backgroundImage，移除旧背景节点时必须置为 none 才能让 WebKit 立即释放上一昼夜的巨幅背景显存
+                    // Tyrano 的 [bg] 背景切换使用 div 的 style.backgroundImage，备份原背景后置为 none 以释放上一昼夜的巨幅背景显存
 
                     if (el.style && el.style.backgroundImage && el.style.backgroundImage !== 'none') {
+
+                        if (!el.getAttribute('data-tyrano-orig-bg')) {
+
+                            el.setAttribute('data-tyrano-orig-bg', el.style.backgroundImage);
+
+                        }
 
                         el.style.backgroundImage = 'none';
 
@@ -1563,13 +1739,17 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            function releaseDetachedMediaOrCanvas(node) {
+            function markDetachedTreeTimestamp(node) {
 
                 try {
 
                     if (!node || node.nodeType !== 1 || node.isConnected) return;
 
-                    scrubSingleDetachedElement(node);
+                    var now = Date.now();
+
+                    node.__tyranoWasMounted = true;
+
+                    if (!node.__tyranoDetachedAt) node.__tyranoDetachedAt = now;
 
                     if (node.querySelectorAll) {
 
@@ -1581,7 +1761,41 @@ struct WebPlayerView: UIViewRepresentable {
 
                             if (ch && !ch.isConnected) {
 
-                                scrubSingleDetachedElement(ch);
+                                ch.__tyranoWasMounted = true;
+
+                                if (!ch.__tyranoDetachedAt) ch.__tyranoDetachedAt = now;
+
+                            }
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+            function releaseDetachedMediaOrCanvas(node, forceImmediate) {
+
+                try {
+
+                    if (!node || node.nodeType !== 1 || node.isConnected) return;
+
+                    scrubSingleDetachedElement(node, forceImmediate);
+
+                    if (node.querySelectorAll) {
+
+                        var children = node.querySelectorAll('img, canvas, video, audio, div, span');
+
+                        for (var i = 0; i < children.length; i++) {
+
+                            var ch = children[i];
+
+                            if (ch && !ch.isConnected) {
+
+                                scrubSingleDetachedElement(ch, forceImmediate);
 
                             }
 
@@ -1653,11 +1867,19 @@ struct WebPlayerView: UIViewRepresentable {
 
                     if (!src || src.indexOf('data:') === 0) return;
 
+                    if (imgEl.isConnected) {
+
+                        imgEl.__tyranoWasMounted = true;
+
+                        imgEl.__tyranoDetachedAt = 0;
+
+                    }
+
                     // 若已在滑动窗口中，移到队尾（LRU 更新）
 
                     for (var i = _activeImageSlidingWindow.length - 1; i >= 0; i--) {
 
-                        if (_activeImageSlidingWindow[i].el === imgEl || _activeImageSlidingWindow[i].src === src) {
+                        if (_activeImageSlidingWindow[i].el === imgEl) {
 
                             _activeImageSlidingWindow.splice(i, 1);
 
@@ -1667,15 +1889,15 @@ struct WebPlayerView: UIViewRepresentable {
 
                     _activeImageSlidingWindow.push({ src: src, el: imgEl });
 
-                    // 当新图片进入窗口导致超出上限时，立即淘汰最老的旧图片并释放其显存
+                    // 当活动窗口超出 48 张上限时，仅淘汰【曾挂载过、现已脱离 DOM 且超过 2.5 秒宽限期】的旧图层
 
                     while (_activeImageSlidingWindow.length > _ACTIVE_IMG_WINDOW_MAX) {
 
                         var evicted = _activeImageSlidingWindow.shift();
 
-                        if (evicted && evicted.el && !evicted.el.isConnected) {
+                        if (evicted && evicted.el && !evicted.el.isConnected && evicted.el.__tyranoWasMounted) {
 
-                            releaseDetachedImageNode(evicted.el);
+                            releaseDetachedImageNode(evicted.el, false);
 
                         }
 
@@ -1687,7 +1909,7 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 监听 DOM 节点移除：每当昼夜交替、摸头结束、换装或切换背景移除了旧图层节点，100ms 后自动销毁其底层纹理与音频句柄
+            // 监听 DOM 节点挂载与移除：挂载时零帧自动恢复被回收过的复用节点，移除满 2.5 秒后自动销毁离屏旧图层纹理
 
             function installDOMRemovalRecycler() {
 
@@ -1717,7 +1939,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                         for (var i = 0; i < batch.length; i++) {
 
-                            releaseDetachedMediaOrCanvas(batch[i]);
+                            var n = batch[i];
+
+                            if (n && !n.isConnected) {
+
+                                releaseDetachedMediaOrCanvas(n, false);
+
+                            }
 
                         }
 
@@ -1729,17 +1957,37 @@ struct WebPlayerView: UIViewRepresentable {
 
                         for (var m = 0; m < mutations.length; m++) {
 
+                            var added = mutations[m].addedNodes;
+
+                            if (added && added.length > 0) {
+
+                                for (var a = 0; a < added.length; a++) {
+
+                                    var an = added[a];
+
+                                    if (an && an.nodeType === 1) {
+
+                                        restoreDetachedNodeIfNeeded(an);
+
+                                    }
+
+                                }
+
+                            }
+
                             var removed = mutations[m].removedNodes;
 
                             if (!removed || removed.length === 0) continue;
 
                             for (var r = 0; r < removed.length; r++) {
 
-                                var n = removed[r];
+                                var rn = removed[r];
 
-                                if (n && n.nodeType === 1) {
+                                if (rn && rn.nodeType === 1 && !rn.isConnected) {
 
-                                    pendingRemovedNodes.push(n);
+                                    markDetachedTreeTimestamp(rn);
+
+                                    pendingRemovedNodes.push(rn);
 
                                 }
 
@@ -1749,7 +1997,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                         if (pendingRemovedNodes.length > 0 && !flushTimer) {
 
-                            flushTimer = setTimeout(flushRemovedNodes, 120);
+                            flushTimer = setTimeout(flushRemovedNodes, _DETACHED_GRACE_MS + 150);
 
                         }
 
@@ -1767,23 +2015,31 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-            // 动态回收已完成播放的音效 (SE) 与历史剧本缓存，防止昼夜循环累加爆表
+            // 动态回收已完成播放的音效 (SE) 与历史离屏缓存，防止昼夜循环累加爆表，同时严密保护在屏换装与差分图层
 
             function recycleFinishedAudioAndScriptCaches(aggressive) {
 
                 try {
 
-                    // 1. 清理滑动窗口中已脱离 DOM 的旧图片引用
+                    // 1. 清理滑动窗口中已脱离 DOM 且满宽限期的旧图片引用（在屏图层 100% 保留）
 
                     for (var i = _activeImageSlidingWindow.length - 1; i >= 0; i--) {
 
                         var item = _activeImageSlidingWindow[i];
 
-                        if (!item || !item.el || !item.el.isConnected) {
-
-                            if (item && item.el) releaseDetachedImageNode(item.el);
+                        if (!item || !item.el) {
 
                             _activeImageSlidingWindow.splice(i, 1);
+
+                        } else if (!item.el.isConnected && item.el.__tyranoWasMounted) {
+
+                            releaseDetachedImageNode(item.el, aggressive);
+
+                            if (item.el.__tyranoReleased) {
+
+                                _activeImageSlidingWindow.splice(i, 1);
+
+                            }
 
                         }
 
@@ -1791,13 +2047,15 @@ struct WebPlayerView: UIViewRepresentable {
 
                     if (aggressive) {
 
-                        while (_activeImageSlidingWindow.length > 4) {
+                        var minKeep = 24; // 即使在系统低内存紧急收缩时也至少保留 24 个活动槽位，确保多层换装叠图绝不闪烁
+
+                        while (_activeImageSlidingWindow.length > minKeep) {
 
                             var oldItem = _activeImageSlidingWindow.shift();
 
-                            if (oldItem && oldItem.el && !oldItem.el.isConnected) {
+                            if (oldItem && oldItem.el && !oldItem.el.isConnected && oldItem.el.__tyranoWasMounted) {
 
-                                releaseDetachedImageNode(oldItem.el);
+                                releaseDetachedImageNode(oldItem.el, true);
 
                             }
 
@@ -1807,13 +2065,11 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
-                    // 2. 卸载 Howler.js 中已经播放完毕的短音效 (SE) 解码缓冲区（保留当前正在播放的 BGM）
+                    // 2. 卸载 Howler.js 中已经播放完毕的短音效 (SE) 解码缓冲区（保留当前正在播放的 BGM 与循环环境音）
 
                     if (window.Howler && Array.isArray(window.Howler._howls)) {
 
                         var howls = window.Howler._howls;
-
-                        // 仅允许最多保留最近 6 个音频实例，其余已停止播放的实例立即调用 unload() 释放 PCM 内存
 
                         var stoppedHowls = [];
 
@@ -1829,7 +2085,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                         }
 
-                        var keepStopped = aggressive ? 0 : 2;
+                        var keepStopped = aggressive ? 0 : 3;
 
                         while (stoppedHowls.length > keepStopped) {
 
@@ -1887,13 +2143,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                         }
 
-                        // 限制 Tyrano 内部 cache_scenario 剧本对象数量不超过 6 个（防止跨天循环不断累积 AST 数组）
+                        // 限制 Tyrano 内部 cache_scenario 剧本对象数量不超过 8 个（防止跨天循环不断累积 AST 数组）
 
                         if (kag.cache_scenario && typeof kag.cache_scenario === 'object') {
 
                             var scKeys = Object.keys(kag.cache_scenario);
 
-                            var maxSc = aggressive ? 2 : 6;
+                            var maxSc = aggressive ? 3 : 8;
 
                             while (scKeys.length > maxSc) {
 
@@ -1911,7 +2167,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                     // 4. 限制 _ksTextMemoryCache 滑动窗口大小
 
-                    var ksLimit = aggressive ? 3 : 8;
+                    var ksLimit = aggressive ? 4 : 10;
 
                     while (_ksCacheOrderQueue.length > ksLimit) {
 
@@ -2375,19 +2631,29 @@ struct WebPlayerView: UIViewRepresentable {
 
                                 if (detachedList.length > 0) {
 
+                                    for (var m = 0; m < detachedList.length; m++) {
+
+                                        if (detachedList[m] && !detachedList[m].isConnected) {
+
+                                            markDetachedTreeTimestamp(detachedList[m]);
+
+                                        }
+
+                                    }
+
                                     setTimeout(function() {
 
                                         for (var k = 0; k < detachedList.length; k++) {
 
                                             if (detachedList[k] && !detachedList[k].isConnected) {
 
-                                                scrubSingleDetachedElement(detachedList[k]);
+                                                scrubSingleDetachedElement(detachedList[k], false);
 
                                             }
 
                                         }
 
-                                    }, 30);
+                                    }, _DETACHED_GRACE_MS + 100);
 
                                 }
 
@@ -2421,19 +2687,29 @@ struct WebPlayerView: UIViewRepresentable {
 
                                 if (targets.length > 0) {
 
+                                    for (var m = 0; m < targets.length; m++) {
+
+                                        if (targets[m] && !targets[m].isConnected) {
+
+                                            markDetachedTreeTimestamp(targets[m]);
+
+                                        }
+
+                                    }
+
                                     setTimeout(function() {
 
                                         for (var k = 0; k < targets.length; k++) {
 
                                             if (targets[k] && !targets[k].isConnected) {
 
-                                                releaseDetachedMediaOrCanvas(targets[k]);
+                                                releaseDetachedMediaOrCanvas(targets[k], false);
 
                                             }
 
                                         }
 
-                                    }, 30);
+                                    }, _DETACHED_GRACE_MS + 100);
 
                                 }
 
@@ -3469,6 +3745,8 @@ struct WebPlayerView: UIViewRepresentable {
 
                     if (!node || node.nodeType !== 1) return;
 
+                    restoreDetachedNodeIfNeeded(node);
+
                     var tag = String(node.tagName || '').toUpperCase();
 
                     if (tag === 'VIDEO') {
@@ -3713,7 +3991,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                         kag.ftag.__tyranoRecyclerHooked = true;
 
-                        var recycleTags = ['bg', 'freeimage', 'mask', 'clearfix'];
+                        var recycleTags = ['bg', 'mask']; // 仅在大场景背景/黑屏转场时触发回收，特写局部差分序列切换期间绝不打断
 
                         for (var rt = 0; rt < recycleTags.length; rt++) {
 
@@ -4715,15 +4993,15 @@ struct WebPlayerView: UIViewRepresentable {
 
             if availBytes > 0 && availBytes < 180 * 1024 * 1024 {
 
-                LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 4 * 1024 * 1024)
+                LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 10 * 1024 * 1024)
 
                 URLCache.shared.removeAllCachedResponses()
 
-                webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(4); }", completionHandler: nil)
+                webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(24); }", completionHandler: nil)
 
             } else {
 
-                LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 10 * 1024 * 1024)
+                LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 24 * 1024 * 1024)
 
                 webView?.evaluateJavaScript("if (typeof window.__tyranoDynamicGC === 'function') { window.__tyranoDynamicGC(); }", completionHandler: nil)
 
@@ -5095,7 +5373,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-    // 严格定长滑动窗口资源池（最多常驻 12 MB / 20 个热点资源，新资源进入时立即淘汰最旧资源，绝不无限上涨）
+    // 场景感知型定长滑动窗口资源池（扩容至 28 MB / 80 个热点资源，轻松容纳 25+ 层换装纸娃娃与高频局部差分序列，同时严控上限绝不爆表）
 
     private var slidingAssetMap: [String: Data] = [:]
 
@@ -5103,9 +5381,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
     private var slidingAssetTotalBytes: Int = 0
 
-    private let maxSlidingPoolBytes: Int = 12 * 1024 * 1024
+    private let maxSlidingPoolBytes: Int = 28 * 1024 * 1024
 
-    private let maxSlidingPoolItems: Int = 20
+    private let maxSlidingPoolItems: Int = 80
 
 
 
@@ -5911,7 +6189,9 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         let mime = mimeType(for: ext)
 
-        let cachePolicy = cacheControlHeader(for: ext)
+        let fileAttrSize = (try? FileManager.default.attributesOfItem(atPath: resolvedFileURL.path)[.size] as? Int) ?? 0
+
+        let cachePolicy = cacheControlHeader(for: ext, fileSize: fileAttrSize)
 
 
 
@@ -6137,7 +6417,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-    private func cacheControlHeader(for ext: String) -> String {
+    private func cacheControlHeader(for ext: String, fileSize: Int = 0) -> String {
 
         if isStaticCacheableAsset(ext: ext) {
 
@@ -6145,7 +6425,19 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
         }
 
-        // 对于图片、音视频与剧本，由本机高速滑动窗口池按需秒回，并指示 WebKit 渲染完离屏后立即释放内存
+        // 分级缓存策略：
+
+        // - 小尺寸差分图层与换装部件（<= 350 KB 的 PNG/WebP/GIF，如眼神高光、汗液、泪珠、表情、服装配饰）允许 WebKit 短效热缓存 180 秒，确保长序列局部差分切换 0 延迟、零重解码；
+
+        // - 超大尺寸全屏背景/全屏 CG（> 350 KB）及音视频流使用 no-store，在跨昼夜脱离屏幕后立即释放显存，彻底杜绝爆表重启。
+
+        let isImage = ext == "png" || ext == "webp" || ext == "gif" || ext == "jpg" || ext == "jpeg"
+
+        if isImage && fileSize > 0 && fileSize <= 358_400 {
+
+            return "public, max-age=180"
+
+        }
 
         return "no-store"
 
