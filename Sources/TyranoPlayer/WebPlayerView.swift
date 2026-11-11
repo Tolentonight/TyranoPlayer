@@ -1055,9 +1055,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                 var nsKey = namespacedKey(key);
 
-                window.__TYRANO_NATIVE_SAVES__[key] = strVal;
+                // v2.2.1: 只存一份带命名空间的键。旧版同时存 key / shortKey / nsKey
 
-                window.__TYRANO_NATIVE_SAVES__[shortKey] = strVal;
+                // 三份，一份检查点字符串要在 JS 堆里占 3 倍内存（再经 sessionStorage
+
+                // 与原生 saveDict 又各复制一份）。readSaveFromNative 仍按 nsKey →
+
+                // key → shortKey 的顺序查找，旧存档的 shortKey 副本仍能读到。
 
                 window.__TYRANO_NATIVE_SAVES__[nsKey] = strVal;
 
@@ -1475,7 +1479,7 @@ struct WebPlayerView: UIViewRepresentable {
 
             // 5.5 场景感知型双层动态滑动窗口资源回收引擎 v2.0（兼顾多图层换装叠图 + 特写长序列局部差分防崩 + 跨昼夜防爆表）
 
-            // 活动图片窗口扩容至 48 张（轻松容纳 15~25 层换装纸娃娃 + 20+ 张高光/汗液/表情局部差分序列），并引入三大防误删铁律：
+            // 活动图片窗口扩容至 32 张（轻松容纳 15~25 层换装纸娃娃 + 20+ 张高光/汗液/表情局部差分序列），并引入三大防误删铁律：
 
             // (1) 在屏绝对免疫（isConnected === true 绝不触碰）
 
@@ -1941,6 +1945,145 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // v2.2.1: 判断一张图当前是否真的不可见。只看图自身 display 不够：
+            // 祖先 display:none 时，子的 getComputedStyle().display 仍返回自身值，
+            // 但 offsetParent 为 null、包围盒为 0。position:fixed 的可见图 offsetParent
+            // 本来就是 null，所以要排除 fixed。
+            function tyranoImgIsHidden(img) {
+
+                try {
+
+                    var cs = window.getComputedStyle ? window.getComputedStyle(img) : null;
+
+                    if (cs) {
+
+                        if (cs.display === 'none' || cs.visibility === 'hidden') return true;
+
+                        if (cs.position !== 'fixed' && img.offsetParent === null) return true;
+
+                        return false;
+
+                    }
+
+                    return !!(img.style && (img.style.display === 'none' || img.style.visibility === 'hidden'));
+
+                } catch (e) {
+
+                    return false;
+
+                }
+
+            }
+
+
+
+            // v2.2.1: 释放“在屏但长期隐藏”的前层差分图。
+            // Teaching Feeling 的换装 / 床上差分是 15-25 张 <img> 同时挂在 .layer_fore
+            // 里靠显隐切换，只有一张可见，其余 display:none 却仍握着 4-5MB 解码位图。
+            // 旧铁律“isConnected 绝不碰”把它们全豁免了，峰值就从这里来。
+            // 只动同时满足以下条件的 img：(1) 不在转场中 (2) 经 tyranoImgIsHidden 判定
+            // 为隐藏 (3) 已持续隐藏超过 2.5 秒 (4) 已完成加载（防止误伤正在解码的新图）。
+            // 不碰 opacity:0（淡入淡出过渡用），不碰当前可见图。
+            // 释放时把原 src 存进 data-tyrano-orig-src（与旧复原机制同一约定），
+            // 并把 src 换成 1x1 透明图；restoreVisibleReleasedImages() 会在图层
+            // 重新可见时 1 秒内把它恢复回来。
+            function releaseHiddenForeLayers() {
+
+                try {
+
+                    var kag = (window.TYRANO && window.TYRANO.kag) ? window.TYRANO.kag : null;
+
+                    if (kag && kag.stat && kag.stat.is_trans) return;
+
+                    var foreLayers = document.querySelectorAll('.layer_fore');
+
+                    var now = Date.now();
+
+                    for (var li = 0; li < foreLayers.length; li++) {
+
+                        var layer = foreLayers[li];
+
+                        if (!layer || !layer.querySelectorAll) continue;
+
+                        var imgs = layer.querySelectorAll('img');
+
+                        for (var ii = 0; ii < imgs.length; ii++) {
+
+                            var img = imgs[ii];
+
+                            if (!img || !img.isConnected) continue;
+
+                            if (img.__tyranoReleased) continue;
+
+                            if (!tyranoImgIsHidden(img)) {
+
+                                img.__tyranoHiddenSince = 0;
+
+                                continue;
+
+                            }
+
+                            if (!img.__tyranoHiddenSince) img.__tyranoHiddenSince = now;
+
+                            if (now - img.__tyranoHiddenSince < 2500) continue;
+
+                            if (img.complete === false) continue;
+
+                            var cSrc = img.getAttribute('src') || img.src || '';
+
+                            if (!cSrc || cSrc === TRANSPARENT_PLACEHOLDER_PNG || cSrc.indexOf('data:') === 0) {
+
+                                img.__tyranoHiddenSince = 0;
+
+                                continue;
+
+                            }
+
+                            img.setAttribute('data-tyrano-orig-src', cSrc);
+
+                            img.__tyranoReleased = true;
+
+                            img.__tyranoHiddenSince = 0;
+
+                            img.setAttribute('src', TRANSPARENT_PLACEHOLDER_PNG);
+
+                        }
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+            // v2.2.1: 把重新可见的已释放差分图恢复回来。只恢复 src 已被剥离的节点；
+            // restoreDetachedNodeIfNeeded 本来就是按这个条件恢复的（src 为空或占位图才恢复原图）。
+            function restoreVisibleReleasedImages() {
+
+                try {
+
+                    var imgs = document.querySelectorAll('img[data-tyrano-orig-src]');
+
+                    for (var i = 0; i < imgs.length; i++) {
+
+                        var img = imgs[i];
+
+                        if (!img || !img.__tyranoReleased) continue;
+
+                        if (tyranoImgIsHidden(img)) continue;
+
+                        restoreDetachedNodeIfNeeded(img);
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
+
             // 拦截离屏 Canvas（如 html2canvas 自动存档缩略图画布）的 toDataURL：导出完成后立即将离屏画布缩为 1x1，避免每次跨天自动截图泄漏 4MB 显存
 
             try {
@@ -2215,6 +2358,12 @@ struct WebPlayerView: UIViewRepresentable {
 
                     scrubHiddenBackLayersAndOverlappedBgs();
 
+                    // v2.2.1: 先恢复刚重新可见的已释放差分图，再释放长期隐藏的前层差分图（见 releaseHiddenForeLayers）。
+
+                    restoreVisibleReleasedImages();
+
+                    releaseHiddenForeLayers();
+
 
 
                     // 1. 清理滑动窗口中已脱离 DOM（或游离预加载超时）的旧图片引用（在屏图层 100% 保留）
@@ -2264,6 +2413,16 @@ struct WebPlayerView: UIViewRepresentable {
                                     }
 
                                 } catch (eH) {}
+
+                                // v2.2.1: Howler.unload() 只释放 PCM 缓冲，不把对象移出
+
+                                // Howler._howls；数组只增不减，是 2-3 天基线爬升的来源之一。
+
+                                // 倒序遍历中 splice 当前项是安全的；被 kag.tmp.map_se /
+
+                                // map_bgm 持有的句柄不受影响（仍可通过原引用重播，Howl 会按需重载）。
+
+                                try { howls.splice(h, 1); } catch (eSplice) {}
 
                             }
 
@@ -2377,9 +2536,19 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // v2.2.1: 旧版忽略 keepCount 参数，传 6 还是传 20 都是同一个激进回收。
+
+            // 现按 keepCount 的语义实现：保留数越小回收越激进（<=8 为激进，否则温和）；
+
+            // Swift 侧低内存分支传 6、常规巡检走 DynamicGC。
+
             window.__tyranoTrimMemoryPool = function(keepCount) {
 
-                recycleFinishedAudioAndScriptCaches(true);
+                var kc = parseInt(keepCount, 10);
+
+                if (isNaN(kc)) kc = 12;
+
+                recycleFinishedAudioAndScriptCaches(kc <= 8);
 
             };
 
@@ -5053,7 +5222,17 @@ struct WebPlayerView: UIViewRepresentable {
 
                                             if (menu.snap && menu.snap.stat) {
 
-                                                syncSaveToNative('__tyrano_auto_checkpoint__', JSON.stringify(menu.snap));
+                                                var cpStr = JSON.stringify(menu.snap);
+
+                                                // v2.2.1: 记录检查点体积。stat 随天数膨胀，检查点是每 4 秒一次全量快照；体积超过 1MB 时记一条 WARN，方便从诊断日志判断重启前检查点是否已大到能放大峰值。
+
+                                                if (cpStr && cpStr.length > 1048576) {
+
+                                                    try { sendLog('WARN', ['[检查点] 体积过大: ' + cpStr.length + ' 字节，当前剧本: ' + curSc]); } catch (eCpLog) {}
+
+                                                }
+
+                                                syncSaveToNative('__tyrano_auto_checkpoint__', cpStr);
 
                                             }
 
@@ -5221,6 +5400,14 @@ struct WebPlayerView: UIViewRepresentable {
 
             }, 6000);
 
+            // v2.2.1: 每 1 秒把重新可见的已释放差分图恢复回来，避免换装切回时出现黑块。
+
+            setInterval(function() {
+
+                try { restoreVisibleReleasedImages(); } catch (e) {}
+
+            }, 1000);
+
 
 
             window.__tyranoHookStorageAndSF = hookTyranoStorageAndSF;
@@ -5377,6 +5564,12 @@ struct WebPlayerView: UIViewRepresentable {
 
         contentController.addUserScript(WKUserScript(source: postloadViewportJS, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
 
+        // v2.2.1: 留存一份注入脚本原文，供进程终止 / 手动重载时重建脚本用。
+
+        context.coordinator.storedPreloadScript = preloadCompatJS
+
+        context.coordinator.storedPostloadScript = postloadViewportJS
+
 
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -5455,19 +5648,11 @@ struct WebPlayerView: UIViewRepresentable {
 
             context.coordinator.reloadSaveDictFromDisk()
 
-            let latestJSON = Self.loadInitialSaveJSON(from: nativeSaveStoreURL)
+            // v2.2.1: 用内存中最新的存档表做合并注入（只补缺失键，不整体覆盖），并先清掉历次重载累积的旧注入脚本。
 
-            let syncBackupScript = WKUserScript(
+            let mergeScript = Coordinator.mergeSavesScript(json: context.coordinator.saveDictJSONString(), autoResume: false)
 
-                source: "window.__TYRANO_NATIVE_SAVES__ = \(latestJSON);",
-
-                injectionTime: .atDocumentStart,
-
-                forMainFrameOnly: false
-
-            )
-
-            webView.configuration.userContentController.addUserScript(syncBackupScript)
+            context.coordinator.resetUserScripts(for: webView, saveScriptSource: mergeScript)
 
             if let httpURL = LocalGameHTTPServer.shared.startAndMakeEntryURL(rootDirectoryURL: readAccessURL, entryHTMLURL: entryHTMLURL) {
 
@@ -5538,6 +5723,10 @@ struct WebPlayerView: UIViewRepresentable {
 
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+
+        // v2.2.1: 退出游戏时立即停掉加载，避免旧 WebContent 进程带着几百 MB 位图与新会话短暂共存。
+
+        uiView.stopLoading()
 
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: Coordinator.consoleHandlerName)
 
@@ -5625,6 +5814,14 @@ struct WebPlayerView: UIViewRepresentable {
 
         private var lastProcessTerminateAt: Date = .distantPast
 
+        private var processTerminateCount = 0
+
+        // v2.2.1: 留存注入脚本原文，供进程终止 / 手动重载时重建脚本用（重建前会先 removeAllUserScripts 清掉累积的旧脚本）。
+
+        var storedPreloadScript: String?
+
+        var storedPostloadScript: String?
+
         private let saveIOQueue = DispatchQueue(label: "com.tyrano.save.io", qos: .utility)
 
         let onConsoleLog: (ConsoleLogEntry) -> Void
@@ -5691,21 +5888,42 @@ struct WebPlayerView: UIViewRepresentable {
 
         private func performSlidingWindowMemoryMaintenance() {
 
-            let availBytes = os_proc_available_memory()
+            // v2.2.1: os_proc_available_memory() 量的是主进程，WebContent 是独立进程——
+            // 它永远看不到真正的内存水位。这里只把它当作“主进程是否也吃紧”的粗信号；
+            // 真正的回收仍由 JS 侧每 6 秒的巡检执行。
+            // 另：URLCache.shared 与 WebKit 解码位图缓存无关，旧的清理调用是无效操作，已移除。
 
-            URLCache.shared.removeAllCachedResponses()
+            let availBytes = os_proc_available_memory()
 
             if availBytes > 0 && availBytes < 220 * 1024 * 1024 {
 
                 LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 4 * 1024 * 1024)
 
-                webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(20); }", completionHandler: nil)
+                // 低内存：只保留少量在屏图，其余激进回收（keepCount 越小越激进，见 JS 侧 TrimMemoryPool）。
+
+                webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(6); }") { [weak self] _, error in
+
+                    if let error {
+
+                        self?.log(level: .error, message: "[内存巡检] TrimMemoryPool 调用失败: \(error.localizedDescription)")
+
+                    }
+
+                }
 
             } else {
 
                 LocalGameHTTPServer.shared.trimSlidingWindow(maxBytes: 6 * 1024 * 1024)
 
-                webView?.evaluateJavaScript("if (typeof window.__tyranoDynamicGC === 'function') { window.__tyranoDynamicGC(); }", completionHandler: nil)
+                webView?.evaluateJavaScript("if (typeof window.__tyranoDynamicGC === 'function') { window.__tyranoDynamicGC(); }") { [weak self] _, error in
+
+                    if let error {
+
+                        self?.log(level: .error, message: "[内存巡检] DynamicGC 调用失败: \(error.localizedDescription)")
+
+                    }
+
+                }
 
             }
 
@@ -5729,7 +5947,15 @@ struct WebPlayerView: UIViewRepresentable {
 
             LocalGameHTTPServer.shared.clearMemoryCaches()
 
-            webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(6); }", completionHandler: nil)
+            webView?.evaluateJavaScript("if (typeof window.__tyranoTrimMemoryPool === 'function') { window.__tyranoTrimMemoryPool(6); }") { [weak self] _, error in
+
+                if let error {
+
+                    self?.log(level: .error, message: "[内存保护] TrimMemoryPool 调用失败: \(error.localizedDescription)")
+
+                }
+
+            }
 
         }
 
@@ -5809,6 +6035,112 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+        /// 把内存中最新的存档表序列化为 JSON 字符串；失败时返回 "{}"。
+        /// 终止恢复必须用内存快照，而不是异步写盘后再读盘（读到的可能是旧快照）。
+
+        func saveDictJSONString() -> String {
+
+            guard let data = try? JSONSerialization.data(withJSONObject: saveDict),
+
+                  let jsonStr = String(data: data, encoding: .utf8) else {
+
+                return "{}"
+
+            }
+
+            return jsonStr
+
+        }
+
+
+
+        /// 同步把存档表写盘（仅用于进程终止等“写完才能读”的关键路径）。
+        /// 注意：persistSaveDict(immediate: true) 仍是异步入队，调用后立刻读盘
+        /// 会读到旧文件——这正是旧恢复链路丢进度的原因之一。
+
+        func persistSaveDictSynchronously() {
+
+            let snapshot = self.saveDict
+
+            LocalGameHTTPServer.shared.replaceLiveSaves(snapshot)
+
+            let targetURL = self.nativeSaveStoreURL
+
+            let dir = targetURL.deletingLastPathComponent()
+
+            if !FileManager.default.fileExists(atPath: dir.path) {
+
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+            }
+
+            if let data = try? JSONSerialization.data(withJSONObject: snapshot, options: []) {
+
+                try? data.write(to: targetURL, options: .atomic)
+
+            }
+
+        }
+
+
+
+        /// 重建注入脚本：先清掉历次重载 / 终止累积的旧脚本，再按顺序重新加入
+        /// preload、postload 与本次的存档合并脚本。只清 WKUserScript，不动
+        /// script message handler（removeAllUserScripts 不影响 handler）。
+
+        func resetUserScripts(for webView: WKWebView, saveScriptSource: String?) {
+
+            let contentController = webView.configuration.userContentController
+
+            // 防守：如果留存脚本丢失，绝不清空现有脚本，只追加存档合并脚本。
+
+            guard let preload = storedPreloadScript else {
+
+                if let saveScript = saveScriptSource {
+
+                    contentController.addUserScript(WKUserScript(source: saveScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+
+                }
+
+                return
+
+            }
+
+            contentController.removeAllUserScripts()
+
+            contentController.addUserScript(WKUserScript(source: preload, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+
+            if let postload = storedPostloadScript {
+
+                contentController.addUserScript(WKUserScript(source: postload, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+
+            }
+
+            if let saveScript = saveScriptSource {
+
+                contentController.addUserScript(WKUserScript(source: saveScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+
+            }
+
+        }
+
+
+
+        /// 生成存档合并注入脚本：把给定 JSON 里的键“补”进现有的
+        /// window.__TYRANO_NATIVE_SAVES__，只补缺失的键，绝不整体覆盖——
+        /// 旧版整体赋值会把 preload 刚从本地 HTTP 服务拉到的最新快照盖回旧版。
+
+        static func mergeSavesScript(json: String, autoResume: Bool) -> String {
+
+            let resumeFlag = autoResume ? " window.__TYRANO_AUTO_RESUME_AFTER_OOM__ = true;" : ""
+
+            return "window.__TYRANO_NATIVE_SAVES__ = window.__TYRANO_NATIVE_SAVES__ || {}; (function(__diskSaves){ for (var __k in __diskSaves) { if (Object.prototype.hasOwnProperty.call(__diskSaves, __k) && !Object.prototype.hasOwnProperty.call(window.__TYRANO_NATIVE_SAVES__, __k)) { window.__TYRANO_NATIVE_SAVES__[__k] = __diskSaves[__k]; } } })(\(json));" + resumeFlag
+
+        }
+
+
+
+
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
 
             if message.name == Self.consoleHandlerName {
@@ -5849,13 +6181,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                     if let key = body["key"] as? String, let val = body["value"] as? String {
 
+                        // v2.2.1: 只存 nsKey 一份。旧版同时存 nsKey 与 shortKey 两份，
+
+                        // 与 JS 侧三份重复叠加后，一份存档要在内存里占 7-8 个副本。
+
+                        // JS 读取仍按 nsKey → key → shortKey 查找，旧存档可读。
+
                         saveDict[key] = val
-
-                        if let shortKey = body["shortKey"] as? String, !shortKey.isEmpty {
-
-                            saveDict[shortKey] = val
-
-                        }
 
                         persistSaveDict()
 
@@ -5907,7 +6239,17 @@ struct WebPlayerView: UIViewRepresentable {
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
 
-            persistSaveDict(immediate: true)
+            processTerminateCount += 1
+
+            // v2.2.1: 先同步写盘（旧版 immediate: true 仍是异步入队，随后立刻读盘会读到旧文件），
+            // 再用内存中最新的存档表做合并注入；同时记下终止次数与存档体积，方便从诊断日志
+            // 判断是“单次峰值被杀”还是“反复被杀”。
+
+            persistSaveDictSynchronously()
+
+            let savesJSON = saveDictJSONString()
+
+            log(level: .error, message: "[WebKit] 渲染进程终止（第 \(processTerminateCount) 次），已同步保存进度，存档表 \(saveDict.count) 键、约 \(savesJSON.count) 字符")
 
             LocalGameHTTPServer.shared.clearMemoryCaches()
 
@@ -5925,19 +6267,10 @@ struct WebPlayerView: UIViewRepresentable {
 
             log(level: .warn, message: "[WebKit] 渲染进程因系统内存压力回收，已保存最新进度并自动恢复…")
 
-            let latestJSON = WebPlayerView.loadInitialSaveJSON(from: nativeSaveStoreURL)
+            // 先清掉历次终止 / 重载累积的注入脚本，再重建 preload / postload 与存档合并脚本；
+            // 不整体覆盖 preload 刚拉到的最新快照。
 
-            let syncBackupScript = WKUserScript(
-
-                source: "window.__TYRANO_NATIVE_SAVES__ = \(latestJSON); window.__TYRANO_AUTO_RESUME_AFTER_OOM__ = true;",
-
-                injectionTime: .atDocumentStart,
-
-                forMainFrameOnly: false
-
-            )
-
-            webView.configuration.userContentController.addUserScript(syncBackupScript)
+            resetUserScripts(for: webView, saveScriptSource: Self.mergeSavesScript(json: savesJSON, autoResume: true))
 
             webView.reload()
 
@@ -6075,7 +6408,7 @@ final class LocalGameHTTPServer: @unchecked Sendable {
 
 
 
-    // 场景感知型定长滑动窗口资源池（扩容至 28 MB / 80 个热点资源，轻松容纳 25+ 层换装纸娃娃与高频局部差分序列，同时严控上限绝不爆表）
+    // 场景感知型定长滑动窗口资源池（扩容至 8 MB / 32 个热点资源，轻松容纳 25+ 层换装纸娃娃与高频局部差分序列，同时严控上限绝不爆表）
 
     private var slidingAssetMap: [String: Data] = [:]
 
