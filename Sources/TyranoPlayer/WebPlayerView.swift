@@ -2015,6 +2015,22 @@ struct WebPlayerView: UIViewRepresentable {
 
                             if (img.__tyranoReleased) continue;
 
+                            // v2.2.1: UI 按钮 / 菜单 / 消息层里的图一律不动。Tyrano 的选项按钮
+                            // （[button] / [link] 图片按钮）与消息框里的指示图也挂在 .layer_fore
+                            // 下，但它们是交互界面不是差分立绘——宁可漏放，不可错放。
+
+                            if (img.className && /button|menu/i.test(String(img.className))) continue;
+
+                            if (img.closest) {
+
+                                try {
+
+                                    if (img.closest('.message_layer, .message_outer, .button, [class*="button"], [class*="menu"]')) continue;
+
+                                } catch (eUi) {}
+
+                            }
+
                             if (!tyranoImgIsHidden(img)) {
 
                                 img.__tyranoHiddenSince = 0;
