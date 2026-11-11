@@ -2100,6 +2100,36 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // v2.2.2: 恢复所有已被释放的图（不管可见与否）。快照拍照前必须先调一次——
+            // 否则检查点会把 1x1 透明占位图一起存进图层 HTML，读档后人物就是透明的。
+            // 只认 data-tyrano-orig-src / data-tyrano-orig-bg 属性，不认 JS 的 __tyranoReleased 标记，所以即使经历过重载也能恢复。
+
+            function restoreAllReleasedImages() {
+
+                try {
+
+                    var imgs = document.querySelectorAll('img[data-tyrano-orig-src]');
+
+                    for (var i = 0; i < imgs.length; i++) {
+
+                        restoreDetachedNodeIfNeeded(imgs[i]);
+
+                    }
+
+                    var bgs = document.querySelectorAll('[data-tyrano-orig-bg]');
+
+                    for (var j = 0; j < bgs.length; j++) {
+
+                        restoreDetachedNodeIfNeeded(bgs[j]);
+
+                    }
+
+                } catch (e) {}
+
+            }
+
+
+
             // 拦截离屏 Canvas（如 html2canvas 自动存档缩略图画布）的 toDataURL：导出完成后立即将离屏画布缩为 1x1，避免每次跨天自动截图泄漏 4MB 显存
 
             try {
@@ -5130,7 +5160,11 @@ struct WebPlayerView: UIViewRepresentable {
 
                                     three: _three,
 
-                                    layer: { map_layer_fore: {}, map_layer_back: {} }
+                                    layer: { map_layer_fore: {}, map_layer_back: {} },
+
+                                    // v2.2.2: 标记备用快照——它的图层是空的。自动检查点绝不能拿它去覆盖上一个好的检查点（见 __tyranoSaveAutoCheckpoint），否则读档后人物图层直接消失。
+
+                                    __tyranoIsFallback: true
 
                                 };
 
@@ -5145,6 +5179,10 @@ struct WebPlayerView: UIViewRepresentable {
                                 var that = this;
 
                                 ensureSaveloadConfig();
+
+                                // v2.2.2: 拍照前先把所有被释放的图恢复回来，否则快照的图层 HTML 里会是 1x1 占位图，读档后人物就是透明的。
+
+                                try { restoreAllReleasedImages(); } catch (eRestoreAll) {}
 
                                 // 关键内存优化：强制传入 'false' 跳过极其耗费显存的 html2canvas 全屏 DOM 截图（每次调用会产生 40~60MB 的离屏 Canvas 峰值导致换装/菜单多次进出后 OOM）
 
@@ -5164,7 +5202,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                                     }
 
-                                }, 400);
+                                }, 1500);
 
                                 try {
 
@@ -5210,13 +5248,17 @@ struct WebPlayerView: UIViewRepresentable {
 
                             var _lastCheckpointAt = 0;
 
+                            // v2.2.2: 检查点最小间隔（毫秒）。快照超过 1MB 时放宽到 10000，减少大快照的拷贝尖峰频率。
+
+                            var _checkpointThrottleMs = 4000;
+
                             window.__tyranoSaveAutoCheckpoint = function() {
 
                                 try {
 
                                     var now = Date.now();
 
-                                    if (now - _lastCheckpointAt < 4000) return;
+                                    if (now - _lastCheckpointAt < _checkpointThrottleMs) return;
 
                                     var curSc = String((kag.stat && kag.stat.current_scenario) || '').toLowerCase();
 
@@ -5238,19 +5280,38 @@ struct WebPlayerView: UIViewRepresentable {
 
                                             if (menu.snap && menu.snap.stat) {
 
-                                                var cpStr = JSON.stringify(menu.snap);
+                                                // v2.2.2: 备用快照的图层是空的，绝不能拿它覆盖上一个好的检查点——否则读档后人物图层直接消失。跳过这一次，等下一次检查点再存。
 
-                                                // v2.2.1: 记录检查点体积。stat 随天数膨胀，检查点是每 4 秒一次全量快照；体积超过 1MB 时记一条 WARN，方便从诊断日志判断重启前检查点是否已大到能放大峰值。
+                                                if (menu.snap.__tyranoIsFallback) {
 
-                                                if (cpStr && cpStr.length > 1048576) {
+                                                    try { sendLog('WARN', ['[检查点] 本次快照为备用快照（图层为空），已跳过同步，保留上一个有效检查点']); } catch (eFbLog) {}
 
-                                                    try { sendLog('WARN', ['[检查点] 体积过大: ' + cpStr.length + ' 字节，当前剧本: ' + curSc]); } catch (eCpLog) {}
+                                                } else {
+
+                                                    var cpStr = JSON.stringify(menu.snap);
+
+                                                    // v2.2.1: 记录检查点体积。stat 随天数膨胀，检查点是每 4 秒一次全量快照；体积超过 1MB 时记一条 WARN，方便从诊断日志判断重启前检查点是否已大到能放大峰值。
+
+                                                    if (cpStr && cpStr.length > 1048576) {
+
+                                                        try { sendLog('WARN', ['[检查点] 体积过大: ' + cpStr.length + ' 字节，当前剧本: ' + curSc]); } catch (eCpLog) {}
+
+                                                        // 快照越大，每次深拷贝+序列化的尖峰越高，检查点间隔放宽到 10 秒。
+
+                                                        _checkpointThrottleMs = 10000;
+
+                                                    } else {
+
+                                                        _checkpointThrottleMs = 4000;
+
+                                                    }
+
+                                                    syncSaveToNative('__tyrano_auto_checkpoint__', cpStr);
 
                                                 }
 
-                                                syncSaveToNative('__tyrano_auto_checkpoint__', cpStr);
-
                                             }
+
 
                                         } catch (eSaveCp) {}
 
@@ -5282,6 +5343,12 @@ struct WebPlayerView: UIViewRepresentable {
 
                                             if (cpObj && cpObj.stat) {
 
+                                                if (cpObj.__tyranoIsFallback) {
+
+                                                    try { sendLog('ERROR', ['[无缝热恢复] 检查点是图层为空的备用快照，人物图层将缺失，仍尝试恢复']); } catch (eFbCp) {}
+
+                                                }
+
                                                 sendLog('WARN', ['[无缝热恢复] 已自动从最近检查点恢复游戏场景，无需重新开始']);
 
                                                 menu.loadGameData(cpObj);
@@ -5298,7 +5365,13 @@ struct WebPlayerView: UIViewRepresentable {
 
                                             }
 
-                                        } catch (eLoadCp) {}
+                                        } catch (eLoadCp) {
+
+                                            // v2.2.2: 恢复失败以前是静默吞掉的——用户只看到回到标题，查不到原因。现在记下来。
+
+                                            try { sendLog('ERROR', ['[无缝热恢复] 恢复失败: ' + (eLoadCp && eLoadCp.message ? eLoadCp.message : String(eLoadCp))]); } catch (eLdLog) {}
+
+                                        }
 
                                     }, 350);
 
