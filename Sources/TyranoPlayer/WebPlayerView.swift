@@ -1489,6 +1489,18 @@ struct WebPlayerView: UIViewRepresentable {
 
             var _activeImageSlidingWindow = [];
 
+            // v2.2.3: 内存状态诊断计数。累计释放/恢复次数、最近一次检查点的体积与是否为备用快照——用来在真机上验证“释放到底有没有在跑”。
+
+            var _tyranoReleaseCount = 0;
+
+            var _tyranoRestoreCount = 0;
+
+            var _lastCheckpointBytes = 0;
+
+            var _lastCheckpointFallback = false;
+
+            var _lastMemLogAt = 0;
+
             var _ACTIVE_IMG_WINDOW_MAX = 32;
 
             var _DETACHED_GRACE_MS = 1500;
@@ -1520,6 +1532,8 @@ struct WebPlayerView: UIViewRepresentable {
                             node.__tyranoReleased = false;
 
                             node.setAttribute('src', savedSrc);
+
+                            _tyranoRestoreCount++;
 
                         }
 
@@ -1558,6 +1572,8 @@ struct WebPlayerView: UIViewRepresentable {
                                 img.__tyranoReleased = false;
 
                                 img.setAttribute('src', sSrc);
+
+                                _tyranoRestoreCount++;
 
                             }
 
@@ -2062,6 +2078,8 @@ struct WebPlayerView: UIViewRepresentable {
                             img.__tyranoHiddenSince = 0;
 
                             img.setAttribute('src', TRANSPARENT_PLACEHOLDER_PNG);
+
+                            _tyranoReleaseCount++;
 
                         }
 
@@ -5202,7 +5220,7 @@ struct WebPlayerView: UIViewRepresentable {
 
                                     }
 
-                                }, 1500);
+                                }, 3000);
 
                                 try {
 
@@ -5280,35 +5298,37 @@ struct WebPlayerView: UIViewRepresentable {
 
                                             if (menu.snap && menu.snap.stat) {
 
-                                                // v2.2.2: 备用快照的图层是空的，绝不能拿它覆盖上一个好的检查点——否则读档后人物图层直接消失。跳过这一次，等下一次检查点再存。
+                                                var cpStr = JSON.stringify(menu.snap);
+
+                                                // v2.2.3: 备用快照也要同步——它的 stat（位置/变量）是最新的，图层为空只是暂时的，后续剧情重新显示时会恢复。v2.2.2 的跳过策略会让检查点永远停在旧场景（饿死更新），比图层缺失更糟。
 
                                                 if (menu.snap.__tyranoIsFallback) {
 
-                                                    try { sendLog('WARN', ['[检查点] 本次快照为备用快照（图层为空），已跳过同步，保留上一个有效检查点']); } catch (eFbLog) {}
+                                                    try { sendLog('ERROR', ['[检查点] 本次快照为备用快照（图层为空），已同步最新进度；图层会在后续剧情重新显示时恢复']); } catch (eFbLog) {}
+
+                                                }
+
+                                                // v2.2.1: 记录检查点体积。stat 随天数膨胀，检查点是每 4 秒一次全量快照；体积超过 1MB 时记一条 WARN，方便从诊断日志判断重启前检查点是否已大到能放大峰值。
+
+                                                if (cpStr && cpStr.length > 1048576) {
+
+                                                    try { sendLog('WARN', ['[检查点] 体积过大: ' + cpStr.length + ' 字节，当前剧本: ' + curSc]); } catch (eCpLog) {}
+
+                                                    // 快照越大，每次深拷贝+序列化的尖峰越高，检查点间隔放宽到 10 秒。
+
+                                                    _checkpointThrottleMs = 10000;
 
                                                 } else {
 
-                                                    var cpStr = JSON.stringify(menu.snap);
-
-                                                    // v2.2.1: 记录检查点体积。stat 随天数膨胀，检查点是每 4 秒一次全量快照；体积超过 1MB 时记一条 WARN，方便从诊断日志判断重启前检查点是否已大到能放大峰值。
-
-                                                    if (cpStr && cpStr.length > 1048576) {
-
-                                                        try { sendLog('WARN', ['[检查点] 体积过大: ' + cpStr.length + ' 字节，当前剧本: ' + curSc]); } catch (eCpLog) {}
-
-                                                        // 快照越大，每次深拷贝+序列化的尖峰越高，检查点间隔放宽到 10 秒。
-
-                                                        _checkpointThrottleMs = 10000;
-
-                                                    } else {
-
-                                                        _checkpointThrottleMs = 4000;
-
-                                                    }
-
-                                                    syncSaveToNative('__tyrano_auto_checkpoint__', cpStr);
+                                                    _checkpointThrottleMs = 4000;
 
                                                 }
+
+                                                _lastCheckpointBytes = cpStr ? cpStr.length : 0;
+
+                                                _lastCheckpointFallback = !!menu.snap.__tyranoIsFallback;
+
+                                                syncSaveToNative('__tyrano_auto_checkpoint__', cpStr);
 
                                             }
 
@@ -5479,6 +5499,54 @@ struct WebPlayerView: UIViewRepresentable {
 
 
 
+            // v2.2.3: 每 30 秒记一行内存状态。用来在真机上验证释放到底有没有在跑：图的总量/隐藏/透明度0/已释放、累计释放与恢复次数、最近一次检查点的体积与是否为备用快照。杀进程前的最后几行就是关键证据。
+
+            function logMemoryState() {
+
+                try {
+
+                    var nowMs = Date.now();
+
+                    if (nowMs - _lastMemLogAt < 30000) return;
+
+                    _lastMemLogAt = nowMs;
+
+                    var allImgs = document.querySelectorAll('img');
+
+                    var hiddenCount = 0;
+
+                    var op0Count = 0;
+
+                    var releasedCount = 0;
+
+                    for (var mi = 0; mi < allImgs.length; mi++) {
+
+                        var mim = allImgs[mi];
+
+                        if (tyranoImgIsHidden(mim)) hiddenCount++;
+
+                        try {
+
+                            if (parseFloat(window.getComputedStyle(mim).opacity || '1') < 0.05) op0Count++;
+
+                        } catch (eOp) {}
+
+                        var mSrc = mim.getAttribute('src') || '';
+
+                        if (mim.getAttribute('data-tyrano-orig-src') && (!mSrc || mSrc === TRANSPARENT_PLACEHOLDER_PNG)) releasedCount++;
+
+                    }
+
+                    var cpInfo = _lastCheckpointBytes ? (_lastCheckpointBytes + '字节' + (_lastCheckpointFallback ? '(备用)' : '')) : '未生成';
+
+                    sendLog('LOG', ['[内存状态] 图 ' + allImgs.length + ' 张 | 隐藏 ' + hiddenCount + ' | 透明度0 ' + op0Count + ' | 已释放 ' + releasedCount + ' | 累计释放 ' + _tyranoReleaseCount + ' 次/恢复 ' + _tyranoRestoreCount + ' 次 | 活动窗 ' + _activeImageSlidingWindow.length + ' | 检查点 ' + cpInfo]);
+
+                } catch (e) {}
+
+            }
+
+
+
             // 每 6 秒执行一次滑动窗口资源巡检，及时清理隐藏的 .layer_back 后备层、已播放完的音效和脱离 DOM 的旧立绘纹理
 
             setInterval(function() {
@@ -5486,6 +5554,8 @@ struct WebPlayerView: UIViewRepresentable {
                 installDOMRemovalRecycler();
 
                 recycleFinishedAudioAndScriptCaches(false);
+
+                try { logMemoryState(); } catch (eMemLog) {}
 
             }, 6000);
 
@@ -6338,7 +6408,10 @@ struct WebPlayerView: UIViewRepresentable {
 
             let savesJSON = saveDictJSONString()
 
-            log(level: .error, message: "[WebKit] 渲染进程终止（第 \(processTerminateCount) 次），已同步保存进度，存档表 \(saveDict.count) 键、约 \(savesJSON.count) 字符")
+
+            let appVersion = "\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?") Build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")"
+
+            log(level: .error, message: "[WebKit] 渲染进程终止（第 \(processTerminateCount) 次），已同步保存进度，存档表 \(saveDict.count) 键、约 \(savesJSON.count) 字符 | \(appVersion)")
 
             LocalGameHTTPServer.shared.clearMemoryCaches()
 
