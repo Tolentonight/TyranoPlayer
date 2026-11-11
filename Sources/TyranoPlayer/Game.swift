@@ -181,7 +181,11 @@ final class AppLogger: ObservableObject {
 
         let device = UIDevice.current
 
-        let header = "=== TyranoPlayer 诊断日志启动 (\(Date().ISO8601Format())) | \(device.model) iOS \(device.systemVersion) ==="
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+
+        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+
+        let header = "=== TyranoPlayer 诊断日志启动 (\(Date().ISO8601Format())) | \(device.model) iOS \(device.systemVersion) | v\(shortVersion) Build \(buildVersion) ==="
 
         append(level: .log, category: "SYSTEM", message: header)
 
